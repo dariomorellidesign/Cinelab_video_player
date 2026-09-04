@@ -36,6 +36,7 @@ public:
     uint32_t DLSSInputH() const { return m_renderH; }
     uint32_t OutputW() const { return m_outputW; }
     uint32_t OutputH() const { return m_outputH; }
+    ID3D12Device* Device() const { return m_device.Get(); }
     void SetDebugView(DebugView v) { m_debugView = v; }
     DebugView GetDebugView() const { return m_debugView; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.11.0 LANGUAGES CXX)
+project(DLSSVideoPlayer VERSION 0.12.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "DLSSVideoPlayer currently targets Windows x64 / D3D12 only.")
@@ -17,9 +17,30 @@ if(NOT EXISTS "${DLSS_SDK}/include/nvsdk_ngx.h")
     message(FATAL_ERROR "NVIDIA DLSS SDK not found at ${DLSS_SDK}. Run build_windows.bat; it clones the official NVIDIA/DLSS repository automatically.")
 endif()
 
+set(NVOF_SDK "${CMAKE_SOURCE_DIR}/external/NvOFSDK" CACHE PATH "Staged NVIDIA Optical Flow SDK 5.0 subset")
+if(NOT EXISTS "${NVOF_SDK}/NvOFInterface/nvOpticalFlowD3D12.h" OR
+   NOT EXISTS "${NVOF_SDK}/Common/NvOFBase/NvOFD3D12.cpp")
+    message(FATAL_ERROR "NVIDIA Optical Flow SDK subset not found at ${NVOF_SDK}. Run the Step 02 apply script first.")
+endif()
+
 set(DLSS_LIB_DIR "${DLSS_SDK}/lib/Windows_x86_64/x64")
 set(DLSS_RUNTIME_REL "${DLSS_SDK}/lib/Windows_x86_64/rel/nvngx_dlss.dll")
 set(DLSS_RUNTIME_DEV "${DLSS_SDK}/lib/Windows_x86_64/dev/nvngx_dlss.dll")
+
+add_library(dmp_nvof_sdk STATIC
+    "${NVOF_SDK}/Common/NvOFBase/NvOF.cpp"
+    "${NVOF_SDK}/Common/NvOFBase/NvOFD3D12.cpp"
+    "${NVOF_SDK}/Common/NvOFBase/NvOFD3DCommon.cpp"
+)
+target_compile_definitions(dmp_nvof_sdk PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+)
+target_compile_options(dmp_nvof_sdk PRIVATE /W3 /EHsc)
+target_include_directories(dmp_nvof_sdk PUBLIC
+    "${NVOF_SDK}/NvOFInterface"
+    "${NVOF_SDK}/Common/NvOFBase"
+)
+target_link_libraries(dmp_nvof_sdk PUBLIC d3d12 dxgi)
 
 add_executable(DLSSVideoPlayer WIN32
     src/main.cpp
@@ -31,6 +52,8 @@ add_executable(DLSSVideoPlayer WIN32
     src/D3D12Renderer.h
     src/TemporalGuides.cpp
     src/TemporalGuides.h
+    src/OpticalFlowEngine.cpp
+    src/OpticalFlowEngine.h
     src/AudioPlayer.cpp
     src/AudioPlayer.h
     src/Log.h
@@ -48,6 +71,7 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
     mfplat mfreadwrite mfuuid
     ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi
     nvsdk_ngx_d
+    dmp_nvof_sdk
 )
 
 add_custom_command(TARGET DLSSVideoPlayer POST_BUILD

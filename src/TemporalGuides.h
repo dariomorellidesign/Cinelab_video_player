@@ -3,9 +3,19 @@
 #include <vector>
 #include <utility>
 
+struct ExternalMotionField {
+    // Interleaved X,Y in SOURCE PIXELS, current frame -> previous frame.
+    const float* motionXY = nullptr;
+    uint32_t gridW = 0;
+    uint32_t gridH = 0;
+    uint32_t sourceW = 0;
+    uint32_t sourceH = 0;
+    bool valid = false;
+};
+
 struct GuideFrame {
-    // Compact analysis grid consumed by a GPU expansion pass:
-    // R = motion X, G = motion Y (current -> previous, already in DLSS input pixels)
+    // Compact/high-quality guide grid consumed by the GPU expansion pass:
+    // R = motion X, G = motion Y (current -> previous, in DLSS input pixels)
     // B = depth proxy [0,1], A = BiasCurrentColor/disocclusion mask [0,1].
     std::vector<float> guideGridRGBA32F;
     uint32_t gridW = 0;
@@ -25,10 +35,11 @@ public:
     void Reset();
     void SetDepthMode(DepthMode mode) { m_depthMode = mode; }
     DepthMode GetDepthMode() const { return m_depthMode; }
+    void SetOutputGrid(uint32_t w, uint32_t h) { m_outputGridW = w; m_outputGridH = h; }
 
     bool Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
                   uint32_t renderW, uint32_t renderH, double targetFps, bool reset,
-                  GuideFrame& out);
+                  GuideFrame& out, const ExternalMotionField* externalMotion = nullptr);
 
 private:
     static float Luma(const uint8_t* p);
@@ -49,6 +60,7 @@ private:
     std::vector<float> m_prevLuma;
     std::vector<float> m_prevDepth;
     uint32_t m_gridW = 0, m_gridH = 0;
+    uint32_t m_outputGridW = 0, m_outputGridH = 0;
     bool m_havePrev = false;
     DepthMode m_depthMode = DepthMode::Estimated;
 };

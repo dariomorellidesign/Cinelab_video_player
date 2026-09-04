@@ -243,10 +243,11 @@ void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
 
 bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
                                        uint32_t renderW, uint32_t renderH, double targetFps, bool reset,
-                                       GuideFrame& out) {
+                                       GuideFrame& out, const ExternalMotionField* externalMotion) {
     if (!bgra || !sourceW || !sourceH || !renderW || !renderH) return false;
     if (reset) Reset();
 
+    // Keep the legacy CPU analysis grid small for depth/mask fallback and scene-cut logic.
     const auto [gw, gh] = AnalysisGrid(sourceW, sourceH, targetFps);
     if (!gw || !gh) return false;
     if (gw != m_gridW || gh != m_gridH) Reset();
@@ -261,7 +262,8 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     float globalCost = 0.0f;
     if (history) {
         EstimateFlow(cur, m_prevLuma, gw, gh, fx, fy, mismatch, globalX, globalY, globalCost);
-        // Use correspondence quality, not raw frame difference, so fast camera pans are not mistaken for cuts.
+        // Retain the baseline scene-cut rule for this checkpoint.  NVOF replaces
+        // motion only; depth/mask/cut behaviour remains intentionally comparable.
         if (globalCost > 0.10f) {
             history = false;
             std::fill(fx.begin(), fx.end(), 0.0f);
@@ -277,41 +279,115 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     std::vector<float> depthGrid;
     BuildDepthProxy(cur, fx, fy, gw, gh, depthGrid);
 
-    // Keep CPU output compact. A D3D12 MRT pass bilinearly expands this grid to
-    // full render-resolution R16G16 motion + R32 depth + R8 bias textures.
-    out.gridW = gw;
-    out.gridH = gh;
-    out.guideGridRGBA32F.assign(size_t(gw) * gh * 4u, 0.0f);
-    const float gridToRenderX = float(renderW) / float(gw);
-    const float gridToRenderY = float(renderH) / float(gh);
-
-    for (uint32_t y = 0; y < gh; ++y) {
-        for (uint32_t x = 0; x < gw; ++x) {
-            const size_t i = size_t(y) * gw + x;
-            float mask = 0.0f;
-            if (history) {
+    // Build the OLD mask at the OLD analysis resolution. In Step 02A we only
+    // replace the motion source, then upsample this baseline mask/depth to the
+    // higher output guide grid so the comparison remains controlled.
+    std::vector<float> maskGrid(size_t(gw) * gh, 0.0f);
+    if (history) {
+        for (uint32_t y = 0; y < gh; ++y) {
+            for (uint32_t x = 0; x < gw; ++x) {
+                const size_t i = size_t(y) * gw + x;
                 const uint32_t xl = x ? x - 1 : x;
                 const uint32_t xr = std::min(gw - 1, x + 1);
                 const uint32_t yt = y ? y - 1 : y;
                 const uint32_t yb = std::min(gh - 1, y + 1);
                 const float dx = fx[size_t(y) * gw + xr] - fx[size_t(y) * gw + xl];
                 const float dy = fy[size_t(yb) * gw + x] - fy[size_t(yt) * gw + x];
-                if (mismatch[i] > 0.115f || std::abs(dx) + std::abs(dy) > 2.5f) mask = 1.0f;
+                if (mismatch[i] > 0.115f || std::abs(dx) + std::abs(dy) > 2.5f)
+                    maskGrid[i] = 1.0f;
             }
-            const size_t o = i * 4u;
-            out.guideGridRGBA32F[o + 0] = history ? fx[i] * gridToRenderX : 0.0f;
-            out.guideGridRGBA32F[o + 1] = history ? fy[i] * gridToRenderY : 0.0f;
-            out.guideGridRGBA32F[o + 2] = depthGrid[i];
-            out.guideGridRGBA32F[o + 3] = mask;
+        }
+    }
+
+    const uint32_t outGW = m_outputGridW ? m_outputGridW : gw;
+    const uint32_t outGH = m_outputGridH ? m_outputGridH : gh;
+    if (!outGW || !outGH) return false;
+
+    auto sampleScalar = [](const std::vector<float>& field, uint32_t sw, uint32_t sh,
+                           float sx, float sy) -> float {
+        if (field.empty() || !sw || !sh) return 0.0f;
+        sx = std::clamp(sx, 0.0f, float(sw - 1));
+        sy = std::clamp(sy, 0.0f, float(sh - 1));
+        const uint32_t x0 = uint32_t(std::floor(sx));
+        const uint32_t y0 = uint32_t(std::floor(sy));
+        const uint32_t x1 = std::min(sw - 1, x0 + 1);
+        const uint32_t y1 = std::min(sh - 1, y0 + 1);
+        const float tx = sx - float(x0);
+        const float ty = sy - float(y0);
+        const float a = field[size_t(y0) * sw + x0];
+        const float b = field[size_t(y0) * sw + x1];
+        const float c = field[size_t(y1) * sw + x0];
+        const float d = field[size_t(y1) * sw + x1];
+        return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty;
+    };
+
+    const bool useExternal = history && externalMotion && externalMotion->valid &&
+        externalMotion->motionXY && externalMotion->gridW && externalMotion->gridH &&
+        externalMotion->sourceW == sourceW && externalMotion->sourceH == sourceH;
+
+    auto sampleExternalMotion = [&](float sx, float sy, float& mx, float& my) {
+        sx = std::clamp(sx, 0.0f, float(externalMotion->gridW - 1));
+        sy = std::clamp(sy, 0.0f, float(externalMotion->gridH - 1));
+        const uint32_t x0 = uint32_t(std::floor(sx));
+        const uint32_t y0 = uint32_t(std::floor(sy));
+        const uint32_t x1 = std::min(externalMotion->gridW - 1, x0 + 1);
+        const uint32_t y1 = std::min(externalMotion->gridH - 1, y0 + 1);
+        const float tx = sx - float(x0);
+        const float ty = sy - float(y0);
+        auto component = [&](uint32_t x, uint32_t y, uint32_t c) {
+            return externalMotion->motionXY[(size_t(y) * externalMotion->gridW + x) * 2u + c];
+        };
+        const float ax = component(x0, y0, 0), bx = component(x1, y0, 0);
+        const float cx = component(x0, y1, 0), dx = component(x1, y1, 0);
+        const float ay = component(x0, y0, 1), by = component(x1, y0, 1);
+        const float cy = component(x0, y1, 1), dy = component(x1, y1, 1);
+        const float topX = ax + (bx - ax) * tx, bottomX = cx + (dx - cx) * tx;
+        const float topY = ay + (by - ay) * tx, bottomY = cy + (dy - cy) * tx;
+        mx = topX + (bottomX - topX) * ty;
+        my = topY + (bottomY - topY) * ty;
+    };
+
+    out.gridW = outGW;
+    out.gridH = outGH;
+    out.guideGridRGBA32F.assign(size_t(outGW) * outGH * 4u, 0.0f);
+
+    const float legacyToRenderX = float(renderW) / float(gw);
+    const float legacyToRenderY = float(renderH) / float(gh);
+    const float sourceToRenderX = float(renderW) / float(sourceW);
+    const float sourceToRenderY = float(renderH) / float(sourceH);
+
+    for (uint32_t y = 0; y < outGH; ++y) {
+        for (uint32_t x = 0; x < outGW; ++x) {
+            const float oldX = (float(x) + 0.5f) * float(gw) / float(outGW) - 0.5f;
+            const float oldY = (float(y) + 0.5f) * float(gh) / float(outGH) - 0.5f;
+            const size_t o = (size_t(y) * outGW + x) * 4u;
+
+            float motionX = 0.0f, motionY = 0.0f;
+            if (history) {
+                if (useExternal) {
+                    const float ofX = (float(x) + 0.5f) * float(externalMotion->gridW) / float(outGW) - 0.5f;
+                    const float ofY = (float(y) + 0.5f) * float(externalMotion->gridH) / float(outGH) - 0.5f;
+                    sampleExternalMotion(ofX, ofY, motionX, motionY);
+                    motionX *= sourceToRenderX;
+                    motionY *= sourceToRenderY;
+                } else {
+                    motionX = sampleScalar(fx, gw, gh, oldX, oldY) * legacyToRenderX;
+                    motionY = sampleScalar(fy, gw, gh, oldX, oldY) * legacyToRenderY;
+                }
+            }
+
+            out.guideGridRGBA32F[o + 0] = motionX;
+            out.guideGridRGBA32F[o + 1] = motionY;
+            out.guideGridRGBA32F[o + 2] = sampleScalar(depthGrid, gw, gh, oldX, oldY);
+            out.guideGridRGBA32F[o + 3] = history ? sampleScalar(maskGrid, gw, gh, oldX, oldY) : 0.0f;
         }
     }
 
     out.hasHistory = history;
-    out.globalMotionX = globalX * gridToRenderX;
-    out.globalMotionY = globalY * gridToRenderY;
+    out.globalMotionX = globalX * legacyToRenderX;
+    out.globalMotionY = globalY * legacyToRenderY;
     out.globalMatchCost = globalCost;
     m_prevLuma = std::move(cur);
     m_havePrev = true;
     return true;
 }
-

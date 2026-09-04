@@ -23,6 +23,7 @@
 #include "VideoDecoder.h"
 #include "D3D12Renderer.h"
 #include "TemporalGuides.h"
+#include "OpticalFlowEngine.h"
 #include "AudioPlayer.h"
 #include "Localization.h"
 #include "Log.h"
@@ -143,20 +144,26 @@ public:
 
     bool Create(HINSTANCE hi) {
         m_loc.Initialize();
+        m_loc.SetLanguage(L"en-US", true);
         LoadVideoSettings();
-        INITCOMMONCONTROLSEX icc{sizeof(icc),ICC_BAR_CLASSES};InitCommonControlsEx(&icc);
+        INITCOMMONCONTROLSEX icc{sizeof(icc),ICC_BAR_CLASSES|ICC_WIN95_CLASSES};InitCommonControlsEx(&icc);
         WNDCLASSW r{}; r.style=CS_DBLCLKS|CS_OWNDC; r.lpfnWndProc=RenderWndProcStatic; r.hInstance=hi; r.lpszClassName=L"DLSSVideoRenderClassV11"; r.hCursor=LoadCursor(nullptr,IDC_ARROW); r.hbrBackground=nullptr; RegisterClassW(&r);
         WNDCLASSW v{}; v.lpfnWndProc=ViewportWndProcStatic; v.hInstance=hi; v.lpszClassName=L"DLSSVideoViewportClassV11"; v.hCursor=LoadCursor(nullptr,IDC_ARROW); v.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); RegisterClassW(&v);
+        WNDCLASSW u{}; u.style=CS_DBLCLKS; u.lpfnWndProc=ControlsWndProcStatic; u.hInstance=hi; u.lpszClassName=L"DLSSMediaControlsClassV12"; u.hCursor=LoadCursor(nullptr,IDC_ARROW); u.hbrBackground=nullptr; RegisterClassW(&u);
         WNDCLASSW a{}; a.lpfnWndProc=AdjustWndProcStatic; a.hInstance=hi; a.lpszClassName=L"DLSSVideoAdjustmentsClassV11"; a.hCursor=LoadCursor(nullptr,IDC_ARROW); a.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&a);
         WNDCLASSW w{}; w.lpfnWndProc=WndProcStatic; w.hInstance=hi; w.lpszClassName=L"DLSSVideoPlayerV11Class"; w.hCursor=LoadCursor(nullptr,IDC_ARROW); w.hbrBackground=CreateSolidBrush(RGB(18,19,21)); RegisterClassW(&w);
         RECT rc{0,0,1440,880}; AdjustWindowRect(&rc,WS_OVERLAPPEDWINDOW,TRUE);
         const std::wstring appTitle=m_loc.Get(L"app.title");
         m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,rc.right-rc.left,rc.bottom-rc.top,nullptr,CreateMenuBar(),hi,this);
         if(!m_hwnd) return false;
+        m_menuBar=GetMenu(m_hwnd);
         RegisterOverlayHotkeys();
         BOOL dark=TRUE; DwmSetWindowAttribute(m_hwnd,20,&dark,sizeof(dark)); DWORD corner=2; DwmSetWindowAttribute(m_hwnd,33,&corner,sizeof(corner));
-        m_viewport=CreateWindowExW(0,v.lpszClassName,nullptr,WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,100,100,m_hwnd,nullptr,hi,nullptr);
+        m_viewport=CreateWindowExW(0,v.lpszClassName,nullptr,WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,100,100,m_hwnd,nullptr,hi,this);
         m_renderWnd=CreateWindowExW(WS_EX_ACCEPTFILES,L"DLSSVideoRenderClassV11",nullptr,WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS,0,0,100,100,m_viewport,nullptr,hi,this);
+        m_controlsWnd=CreateWindowExW(0,L"DLSSMediaControlsClassV12",nullptr,WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS,0,0,100,CONTROL_H,m_hwnd,nullptr,hi,this);
+        if(!m_controlsWnd)return false;
+        CreateDebugTooltips();
         m_font=CreateFontW(-16,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
         m_fontSmall=CreateFontW(-14,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
         DragAcceptFiles(m_hwnd,TRUE); DragAcceptFiles(m_renderWnd,TRUE); ShowWindow(m_viewport,SW_HIDE); Layout(); UpdateTitle();
@@ -165,6 +172,7 @@ public:
     }
 
     void Tick() {
+        UpdateFullscreenUiVisibility();
         if(m_seekPending) {
             const double target=m_pendingSeekSec; const bool resume=m_seekResumePlaying;
             m_seekPending=false; PerformSeek(target,resume); return;
@@ -198,7 +206,7 @@ public:
         m_currentSec=due; m_guideReset=false; m_dlssReset=false;
         if(!m_decoder.ReadNext(m_next)){m_haveNext=false;m_playing=false;m_audio.Pause(true);}
         if((++m_uiTick%15)==0) UpdateTitle();
-        InvalidateRect(m_hwnd,nullptr,FALSE);
+        InvalidateControls();
     }
 
     bool Running()const{return m_running;}
@@ -232,6 +240,8 @@ private:
         m_colorSettings.gamma=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Gamma",1.0f),0.25f,3.0f);
         m_colorSettings.temperature=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Temperature",0.0f),-1.0f,1.0f);
         m_colorSettings.tint=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Tint",0.0f),-1.0f,1.0f);
+        const auto path=SettingsPath();
+        m_fullscreenAutoHide=GetPrivateProfileIntW(L"UI",L"FullscreenAutoHide",1,path.c_str())!=0;
     }
 
     void SaveVideoSettings()const{
@@ -241,6 +251,8 @@ private:
         WriteIniFloat(L"VideoAdjustments",L"Gamma",m_colorSettings.gamma);
         WriteIniFloat(L"VideoAdjustments",L"Temperature",m_colorSettings.temperature);
         WriteIniFloat(L"VideoAdjustments",L"Tint",m_colorSettings.tint);
+        const auto path=SettingsPath();
+        WritePrivateProfileStringW(L"UI",L"FullscreenAutoHide",m_fullscreenAutoHide?L"1":L"0",path.c_str());
     }
 
     void ApplyVideoAdjustments(bool refreshPaused=true){
@@ -251,9 +263,8 @@ private:
     }
 
     void InvalidateControls(){
-        if(!m_hwnd)return;RECT c{};GetClientRect(m_hwnd,&c);
-        if(!m_loaded){InvalidateRect(m_hwnd,nullptr,FALSE);return;}
-        RECT bar{0,std::max<LONG>(0,c.bottom-CONTROL_H),c.right,c.bottom};InvalidateRect(m_hwnd,&bar,FALSE);
+        if(!m_loaded){if(m_hwnd)InvalidateRect(m_hwnd,nullptr,FALSE);return;}
+        if(m_controlsWnd&&IsWindowVisible(m_controlsWnd))InvalidateRect(m_controlsWnd,nullptr,FALSE);
     }
 
     void SetTrack(HWND h,int id,int lo,int hi,int pos){
@@ -353,12 +364,17 @@ private:
         return a?a->WndProc(h,m,w,l):DefWindowProcW(h,m,w,l);
     }
     static LRESULT CALLBACK ViewportWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l) {
+        PlayerApp* a=nullptr;
+        if(m==WM_NCCREATE){auto* cs=reinterpret_cast<CREATESTRUCTW*>(l);a=static_cast<PlayerApp*>(cs->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}
+        else a=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));
         switch(m){
         case WM_ERASEBKGND:return 1;
-        case WM_PAINT:{
-            PAINTSTRUCT ps{};HDC dc=BeginPaint(h,&ps);RECT r{};GetClientRect(h,&r);
-            FillRect(dc,&r,(HBRUSH)GetStockObject(BLACK_BRUSH));EndPaint(h,&ps);return 0;
-        }}
+        case WM_PAINT:{PAINTSTRUCT ps{};HDC dc=BeginPaint(h,&ps);RECT r{};GetClientRect(h,&r);FillRect(dc,&r,(HBRUSH)GetStockObject(BLACK_BRUSH));EndPaint(h,&ps);return 0;}
+        case WM_MOUSEMOVE:
+            if(a){POINT p{GET_X_LPARAM(l),GET_Y_LPARAM(l)};MapWindowPoints(h,a->m_hwnd,&p,1);a->HandleFullscreenPointer(p.x,p.y);}return 0;
+        case WM_MOUSEWHEEL:case WM_KEYDOWN:case WM_SYSKEYDOWN:
+            if(a)return SendMessageW(a->m_hwnd,m,w,l);break;
+        }
         return DefWindowProcW(h,m,w,l);
     }
 
@@ -376,16 +392,17 @@ private:
         if(a){
             if(m==WM_ERASEBKGND)return 1;
             if(m==WM_PAINT){PAINTSTRUCT ps{};BeginPaint(h,&ps);EndPaint(h,&ps);return 0;}
+            if(m==WM_MOUSEMOVE){POINT p{GET_X_LPARAM(l),GET_Y_LPARAM(l)};MapWindowPoints(h,a->m_hwnd,&p,1);a->HandleFullscreenPointer(p.x,p.y);return 0;}
             if(m==WM_LBUTTONDOWN){SetFocus(a->m_hwnd);return 0;}
             if(m==WM_LBUTTONDBLCLK){a->ToggleFullscreen();return 0;}
             if(m==WM_MOUSEWHEEL||m==WM_KEYDOWN||m==WM_SYSKEYDOWN)return SendMessageW(a->m_hwnd,m,w,l);
-            if(m==WM_DROPFILES)return SendMessageW(a->m_hwnd,m,w,l); // main window owns DragFinish().
+            if(m==WM_DROPFILES)return SendMessageW(a->m_hwnd,m,w,l);
         }
         return DefWindowProcW(h,m,w,l);
     }
 
     HMENU CreateMenuBar() {
-        HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu(),language=CreatePopupMenu();
+        HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu();
         auto add=[&](HMENU m,UINT id,const wchar_t* key){std::wstring s=T(key);AppendMenuW(m,MF_STRING,id,s.c_str());};
         add(file,IDM_OPEN,L"menu.open"); AppendMenuW(file,MF_SEPARATOR,0,nullptr); add(file,IDM_EXIT,L"menu.exit");
         add(play,IDM_PLAY,L"menu.playpause"); add(play,IDM_STOP,L"menu.stop"); add(play,IDM_BACK10,L"menu.back10"); add(play,IDM_FWD10,L"menu.forward10"); add(play,IDM_MUTE,L"menu.mute");
@@ -394,14 +411,11 @@ private:
         add(quality,IDM_QUALITY_AUTO,L"menu.quality_auto"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_QUALITY,L"Quality"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_BALANCED,L"Balanced"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_PERFORMANCE,L"Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_ULTRAPERF,L"Ultra Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_DLAA,L"DLAA");
         add(dlss,IDM_DLSS,L"menu.dlss_toggle"); add(dlss,IDM_REHOOK,L"menu.rehook"); add(dlss,IDM_DEPTH_MODE,L"menu.depthmode"); std::wstring qualityName=T(L"menu.quality"); AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(quality),qualityName.c_str());
         m_languageCodes.clear();
-        const auto packs=m_loc.AvailableLanguages();
-        for(size_t i=0;i<packs.size()&&i<100;++i){
-            m_languageCodes.push_back(packs[i].code);
-            UINT flags=MF_STRING|(m_loc.Code()==packs[i].code?MF_CHECKED:MF_UNCHECKED);
-            AppendMenuW(language,flags,IDM_LANG_BASE+static_cast<UINT>(i),packs[i].name.c_str());
-        }
-        std::wstring sFile=T(L"menu.file"),sPlay=T(L"menu.playback"),sVideo=T(L"menu.video"),sDlss=T(L"menu.dlss"),sLang=T(L"menu.language");
-        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(file),sFile.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(play),sPlay.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(video),sVideo.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(dlss),sDlss.c_str()); AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(language),sLang.c_str());
+        std::wstring sFile=T(L"menu.file"),sPlay=T(L"menu.playback"),sVideo=T(L"menu.video"),sDlss=T(L"menu.dlss");
+        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(file),sFile.c_str());
+        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(play),sPlay.c_str());
+        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(video),sVideo.c_str());
+        AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(dlss),sDlss.c_str());
         return bar;
     }
 
@@ -422,11 +436,30 @@ private:
         const auto [decodeW,decodeH]=RecommendedDecodeSize(m_decoder.NativeWidth(),m_decoder.NativeHeight(),ow,oh,m_activeQuality);
         if((decodeW!=m_decoder.Width()||decodeH!=m_decoder.Height()) && !m_decoder.SetDecodeSize(decodeW,decodeH))
             LOG("Realtime decode scaling unavailable; continuing at native decoder resolution.");
-        const auto [guideW,guideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
+        const auto [analysisGuideW,analysisGuideH]=TemporalGuideGenerator::AnalysisGrid(m_decoder.Width(),m_decoder.Height(),m_decoder.FrameRate());
+        uint32_t guideW=analysisGuideW,guideH=analysisGuideH;
+        const bool nvofRuntime=OpticalFlowEngine::RuntimeAvailable();
+        if(nvofRuntime){
+            // Step 02A target: a 2x2 guide grid (960x540 for 1080p) instead of ~160x90.
+            guideW=std::max(analysisGuideW,(m_decoder.Width()+1u)/2u);
+            guideH=std::max(analysisGuideH,(m_decoder.Height()+1u)/2u);
+            LOG("[NVOF] Driver runtime detected; guide upload grid="<<guideW<<"x"<<guideH);
+        }
         ShowWindow(m_viewport,SW_SHOW); Layout();
         m_renderer=std::make_unique<D3D12Renderer>();
         if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)){std::wstring e=T(L"error.renderer"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);m_renderer.reset();m_decoder.Close();ShowWindow(m_viewport,SW_HIDE);return false;}
         m_renderer->SetColorSettings(m_colorSettings);
+        m_guides.SetOutputGrid(guideW,guideH);
+        m_opticalFlow.reset();
+        if(nvofRuntime){
+            auto of=std::make_unique<OpticalFlowEngine>();
+            if(of->Initialize(m_renderer->Device(),m_decoder.Width(),m_decoder.Height(),2u)){
+                LOG("[NVOF] Active: hwGrid="<<of->GridSize()<<" output="<<of->GridW()<<"x"<<of->GridH());
+                m_opticalFlow=std::move(of);
+            }else{
+                LOG("[NVOF] Initialization failed; legacy motion fallback remains active.");
+            }
+        }
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
         m_haveNext=m_decoder.ReadNext(m_next);m_audio.Start(path,m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=path;m_droppedFrames=0;m_uiTick=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;
@@ -434,13 +467,20 @@ private:
     }
 
     void Unload() {
-        m_seekPending=false;m_seeking=false;m_audio.Stop(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();
+        m_seekPending=false;m_seeking=false;m_audio.Stop(); m_opticalFlow.reset(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE); UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
     bool RenderVideoFrame(const VideoFrame& f,bool resetGuide) {
         if(!m_renderer)return false; GuideFrame g;
-        if(!m_guides.Generate(f.bgra.data(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_decoder.FrameRate(),resetGuide,g))return false;
+        OpticalFlowFrame ofFrame; ExternalMotionField external{}; const ExternalMotionField* externalPtr=nullptr;
+        if(m_opticalFlow){
+            if(m_opticalFlow->Generate(f.bgra.data(),f.bgra.size(),resetGuide,ofFrame) && ofFrame.valid){
+                external.motionXY=ofFrame.motionXY.data();external.gridW=ofFrame.gridW;external.gridH=ofFrame.gridH;
+                external.sourceW=ofFrame.sourceW;external.sourceH=ofFrame.sourceH;external.valid=true;externalPtr=&external;
+            }
+        }
+        if(!m_guides.Generate(f.bgra.data(),m_decoder.Width(),m_decoder.Height(),m_renderer->DLSSInputW(),m_renderer->DLSSInputH(),m_decoder.FrameRate(),resetGuide,g,externalPtr))return false;
         float ms=float(1000.0/std::max(1.0,m_decoder.FrameRate()));
         if(m_lastRenderedTs>=0 && f.timestamp100ns>m_lastRenderedTs){double d=double(f.timestamp100ns-m_lastRenderedTs)*1e-4;if(d>0.1&&d<500.0)ms=float(d);}
         bool r=m_dlssReset||resetGuide||!g.hasHistory;
@@ -540,42 +580,121 @@ private:
 
     void UpdateTitle(){
         if(!m_hwnd)return; if(!m_loaded||!m_renderer){SetWindowTextW(m_hwnd,T(L"app.title").c_str());return;}
-        std::wstringstream s;s<<L"DLSS Video Player V11 | source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())s<<L" decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();s<<L" | "<<QualityNameW(m_activeQuality)<<L" | DLSS "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L" -> "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L" | "<<m_decoder.BackendName()<<L" | NGX "<<(m_renderer->DLSSFeatureCreated()?L"CREATE OK":(m_renderer->DLSSAvailable()?L"READY":L"FALLBACK"))<<L" | "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L" | result 0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec;SetWindowTextW(m_hwnd,s.str().c_str());
+        std::wstringstream s;s<<L"DLSS Video Player V11 | source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())s<<L" decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();s<<L" | "<<QualityNameW(m_activeQuality)<<L" | DLSS "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L" -> "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L" | "<<m_decoder.BackendName()<<L" | NGX "<<(m_renderer->DLSSFeatureCreated()?L"CREATE OK":(m_renderer->DLSSAvailable()?L"READY":L"FALLBACK"))<<L" | "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L" | result 0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec;if(m_opticalFlow)s<<L" | NVOF "<<m_opticalFlow->GridSize()<<L"x "<<m_opticalFlow->GridW()<<L"x"<<m_opticalFlow->GridH();SetWindowTextW(m_hwnd,s.str().c_str());
     }
 
     void Layout(){
-        if(!m_hwnd||!m_viewport||!m_renderWnd)return;RECT c{};GetClientRect(m_hwnd,&c);int W=static_cast<int>(std::max<LONG>(1,c.right-c.left)),H=static_cast<int>(std::max<LONG>(1,c.bottom-c.top));
-        if(!m_loaded){MoveWindow(m_viewport,0,0,W,H,TRUE);return;}
-        int areaH=std::max(1,H-CONTROL_H);MoveWindow(m_viewport,0,0,W,areaH,TRUE);double ar=m_dar>0?m_dar:16.0/9.0;double areaAr=double(W)/areaH;int rw=0,rh=0;
-        if(m_fill){if(areaAr>ar){rw=W;rh=int(std::lround(W/ar));}else{rh=areaH;rw=int(std::lround(areaH*ar));}}else{if(areaAr>ar){rh=areaH;rw=int(std::lround(areaH*ar));}else{rw=W;rh=int(std::lround(W/ar));}}
-        SetWindowPos(m_renderWnd,nullptr,(W-rw)/2,(areaH-rh)/2,std::max(1,rw),std::max(1,rh),SWP_NOZORDER|SWP_NOACTIVATE);
-        InvalidateRect(m_viewport,nullptr,FALSE);InvalidateControls();
+        if(!m_hwnd||!m_viewport||!m_renderWnd||!m_controlsWnd)return;
+        RECT c{};GetClientRect(m_hwnd,&c);int W=static_cast<int>(std::max<LONG>(1,c.right-c.left)),H=static_cast<int>(std::max<LONG>(1,c.bottom-c.top));
+        if(!m_loaded){ShowWindow(m_controlsWnd,SW_HIDE);MoveWindow(m_viewport,0,0,W,H,TRUE);return;}
+        ShowWindow(m_viewport,SW_SHOW);
+        if(m_fullscreen){
+            MoveWindow(m_viewport,0,0,W,H,TRUE);
+            if(m_fullscreenAutoHide&&m_fullscreenControlsHidden){ShowWindow(m_controlsWnd,SW_HIDE);if(m_tooltipWnd)SendMessageW(m_tooltipWnd,TTM_POP,0,0);}
+            else{MoveWindow(m_controlsWnd,0,std::max(0,H-CONTROL_H),W,CONTROL_H,TRUE);ShowWindow(m_controlsWnd,SW_SHOW);SetWindowPos(m_controlsWnd,HWND_TOP,0,std::max(0,H-CONTROL_H),W,CONTROL_H,SWP_SHOWWINDOW|SWP_NOACTIVATE);}
+        }else{
+            m_fullscreenControlsHidden=false;
+            int areaH=std::max(1,H-CONTROL_H);MoveWindow(m_viewport,0,0,W,areaH,TRUE);MoveWindow(m_controlsWnd,0,areaH,W,CONTROL_H,TRUE);ShowWindow(m_controlsWnd,SW_SHOW);SetWindowPos(m_controlsWnd,HWND_TOP,0,areaH,W,CONTROL_H,SWP_SHOWWINDOW|SWP_NOACTIVATE);
+        }
+        RECT vc{};GetClientRect(m_viewport,&vc);int areaW=std::max<LONG>(1,vc.right-vc.left),areaH=std::max<LONG>(1,vc.bottom-vc.top);
+        double ar=m_dar>0?m_dar:16.0/9.0;double areaAr=double(areaW)/areaH;int rw=0,rh=0;
+        if(m_fill){if(areaAr>ar){rw=areaW;rh=int(std::lround(areaW/ar));}else{rh=areaH;rw=int(std::lround(areaH*ar));}}
+        else{if(areaAr>ar){rh=areaH;rw=int(std::lround(areaH*ar));}else{rw=areaW;rh=int(std::lround(areaW/ar));}}
+        SetWindowPos(m_renderWnd,nullptr,(areaW-rw)/2,(areaH-rh)/2,std::max(1,rw),std::max(1,rh),SWP_NOZORDER|SWP_NOACTIVATE);
+        InvalidateRect(m_viewport,nullptr,FALSE);UpdateTooltipRects();InvalidateControls();
     }
 
-    RECT TimelineRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{18,c.bottom-24,c.right-18,c.bottom-14};}
-    RECT VolumeRect()const{RECT c{};GetClientRect(m_hwnd,&c);return RECT{c.right-185,c.bottom-69,c.right-95,c.bottom-61};}
+    RECT ControlClientRect()const{RECT c{};if(m_controlsWnd)GetClientRect(m_controlsWnd,&c);return c;}
+    RECT TimelineRect()const{RECT c=ControlClientRect();return RECT{18,c.bottom-18,std::max<LONG>(19,c.right-18),c.bottom-10};}
+    RECT VolumeRect()const{RECT c=ControlClientRect();return RECT{std::max<LONG>(18,c.right-260),c.bottom-66,std::max<LONG>(19,c.right-145),c.bottom-58};}
+    RECT MuteRect()const{RECT c=ControlClientRect();return RECT{std::max<LONG>(18,c.right-132),c.bottom-82,std::max<LONG>(19,c.right-70),c.bottom-44};}
+    RECT FpsRect()const{RECT c=ControlClientRect();return RECT{std::max<LONG>(18,c.right-430),c.bottom-82,std::max<LONG>(19,c.right-278),c.bottom-44};}
     RECT EmptyOpenRect()const{RECT c{};GetClientRect(m_hwnd,&c);int cx=(c.left+c.right)/2,cy=(c.top+c.bottom)/2;return RECT{cx-95,cy+46,cx+95,cy+88};}
-    RECT ButtonRect(int idx,int width)const{RECT c{};GetClientRect(m_hwnd,&c);int x=14;const int widths[]={68,44,62,48,44,54,82,72,66,88,44,56,52,54};for(int i=0;i<idx&&i<14;++i)x+=widths[i]+5;return RECT{x,c.bottom-96,x+width,c.bottom-58};}
+    int ButtonWidth(int idx)const{static const int widths[]={56,42,46,42,42,84,66,64,74,48,58,52,54,70};return (idx>=0&&idx<14)?widths[idx]:0;}
+    RECT ButtonRect(int idx)const{RECT c=ControlClientRect();int x=12;for(int i=0;i<idx&&i<14;++i)x+=ButtonWidth(i)+5;return RECT{x,9,x+ButtonWidth(idx),45};}
     bool PtIn(const RECT&r,int x,int y)const{return x>=r.left&&x<r.right&&y>=r.top&&y<r.bottom;}
 
-    void DrawButton(HDC dc,const RECT&r,const std::wstring&text,bool active=false){bool hover=PtIn(r,m_mouseX,m_mouseY);COLORREF fill=active?RGB(34,112,190):(hover?RGB(62,65,70):RGB(47,49,53));HBRUSH b=CreateSolidBrush(fill);HPEN p=CreatePen(PS_SOLID,1,active?RGB(70,155,235):RGB(75,78,84));auto ob=SelectObject(dc,b),op=SelectObject(dc,p);RoundRect(dc,r.left,r.top,r.right,r.bottom,8,8);SelectObject(dc,ob);SelectObject(dc,op);DeleteObject(b);DeleteObject(p);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(240,240,242));auto of=SelectObject(dc,m_font);RECT t=r;DrawTextW(dc,text.c_str(),-1,&t,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);}
+    void DrawButton(HDC dc,const RECT&r,const std::wstring&text,bool active=false,bool hover=false){
+        const COLORREF fill=active?RGB(32,102,170):(hover?RGB(58,61,67):RGB(39,41,46));
+        const COLORREF edge=active?RGB(80,164,240):(hover?RGB(92,96,104):RGB(62,65,72));
+        HGDIOBJ ob=SelectObject(dc,GetStockObject(DC_BRUSH)),op=SelectObject(dc,GetStockObject(DC_PEN));SetDCBrushColor(dc,fill);SetDCPenColor(dc,edge);RoundRect(dc,r.left,r.top,r.right,r.bottom,10,10);SelectObject(dc,ob);SelectObject(dc,op);
+        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,active?RGB(248,250,252):RGB(232,234,238));auto of=SelectObject(dc,m_font);RECT t=r;DrawTextW(dc,text.c_str(),-1,&t,DT_CENTER|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);SelectObject(dc,of);
+    }
+
+    int HitTestButton(int x,int y)const{for(int i=0;i<14;++i)if(PtIn(ButtonRect(i),x,y))return i;if(PtIn(MuteRect(),x,y))return 100;return -1;}
+    RECT HoverRect(int id)const{if(id>=0&&id<14)return ButtonRect(id);if(id==100)return MuteRect();return RECT{};}
+    void UpdateHover(int x,int y){
+        const int next=HitTestButton(x,y);if(next==m_hoverButton)return;const int old=m_hoverButton;m_hoverButton=next;
+        if(m_controlsWnd){if(old!=-1){RECT r=HoverRect(old);InvalidateRect(m_controlsWnd,&r,FALSE);}if(next!=-1){RECT r=HoverRect(next);InvalidateRect(m_controlsWnd,&r,FALSE);}}
+    }
+
+    void CreateDebugTooltips(){
+        if(!m_controlsWnd)return;
+        m_tooltipWnd=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_BALLOON|TTS_NOPREFIX,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,m_controlsWnd,nullptr,GetModuleHandleW(nullptr),nullptr);
+        if(!m_tooltipWnd)return;
+        SetWindowPos(m_tooltipWnd,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);SendMessageW(m_tooltipWnd,TTM_SETMAXTIPWIDTH,0,360);SendMessageW(m_tooltipWnd,TTM_SETDELAYTIME,TTDT_INITIAL,2000);SendMessageW(m_tooltipWnd,TTM_SETDELAYTIME,TTDT_AUTOPOP,12000);
+        auto add=[&](UINT_PTR id,int button,const wchar_t* text){TTTOOLINFOW ti{sizeof(ti)};ti.uFlags=TTF_SUBCLASS;ti.hwnd=m_controlsWnd;ti.uId=id;ti.rect=ButtonRect(button);ti.lpszText=const_cast<LPWSTR>(text);SendMessageW(m_tooltipWnd,TTM_ADDTOOLW,0,reinterpret_cast<LPARAM>(&ti));};
+        add(1001,9,L"Motion Vectors\nCurrent-to-previous motion supplied to DLSS/NR. Coherent regions indicate similar direction and magnitude. This is reconstructed optical flow, not the original game motion buffer.");
+        add(1002,10,L"Depth Guide\nEstimated depth supplied to DLSS/NR. It is reconstructed from the video and is not the original game Z-buffer.");
+        add(1003,11,L"Temporal Mask\nBias/current-color and disocclusion guide. Bright regions tell the temporal renderer to trust the current frame more strongly.");
+    }
+    void UpdateTooltipRects(){
+        if(!m_tooltipWnd||!m_controlsWnd)return;auto upd=[&](UINT_PTR id,int button){TTTOOLINFOW ti{sizeof(ti)};ti.uFlags=TTF_SUBCLASS;ti.hwnd=m_controlsWnd;ti.uId=id;ti.rect=ButtonRect(button);SendMessageW(m_tooltipWnd,TTM_NEWTOOLRECTW,0,reinterpret_cast<LPARAM>(&ti));};upd(1001,9);upd(1002,10);upd(1003,11);
+    }
 
     void Paint(){
-        PAINTSTRUCT ps{};HDC dc=BeginPaint(m_hwnd,&ps);RECT c{};GetClientRect(m_hwnd,&c);
-        if(!m_loaded){
-            HBRUSH bg=CreateSolidBrush(RGB(18,19,21));FillRect(dc,&c,bg);DeleteObject(bg);SetBkMode(dc,TRANSPARENT);
-            RECT title{40,(c.bottom/2)-62,c.right-40,(c.bottom/2)-18};SetTextColor(dc,RGB(242,243,245));auto of=SelectObject(dc,m_font);std::wstring tt=T(L"idle.title");DrawTextW(dc,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
-            RECT sub{40,(c.bottom/2)-17,c.right-40,(c.bottom/2)+24};SetTextColor(dc,RGB(160,164,172));SelectObject(dc,m_fontSmall);std::wstring ss=T(L"idle.subtitle");DrawTextW(dc,ss.c_str(),-1,&sub,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(dc,of);
-            DrawButton(dc,EmptyOpenRect(),T(L"idle.open"));EndPaint(m_hwnd,&ps);return;
+        PAINTSTRUCT ps{};HDC dc=BeginPaint(m_hwnd,&ps);if(!dc)return;RECT c{};GetClientRect(m_hwnd,&c);
+        if(m_loaded){EndPaint(m_hwnd,&ps);return;}
+        const int W=std::max<LONG>(1,c.right),H=std::max<LONG>(1,c.bottom);HDC mem=CreateCompatibleDC(dc);HBITMAP bmp=CreateCompatibleBitmap(dc,W,H);HGDIOBJ old=SelectObject(mem,bmp);
+        HBRUSH bg=CreateSolidBrush(RGB(18,19,21));FillRect(mem,&c,bg);DeleteObject(bg);SetBkMode(mem,TRANSPARENT);
+        RECT title{40,(c.bottom/2)-62,c.right-40,(c.bottom/2)-18};SetTextColor(mem,RGB(242,243,245));auto of=SelectObject(mem,m_font);std::wstring tt=T(L"idle.title");DrawTextW(mem,tt.c_str(),-1,&title,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        RECT sub{40,(c.bottom/2)-17,c.right-40,(c.bottom/2)+24};SetTextColor(mem,RGB(160,164,172));SelectObject(mem,m_fontSmall);std::wstring ss=T(L"idle.subtitle");DrawTextW(mem,ss.c_str(),-1,&sub,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(mem,of);
+        DrawButton(mem,EmptyOpenRect(),T(L"idle.open"),false,PtIn(EmptyOpenRect(),m_mouseX,m_mouseY));BitBlt(dc,0,0,W,H,mem,0,0,SRCCOPY);SelectObject(mem,old);DeleteObject(bmp);DeleteDC(mem);EndPaint(m_hwnd,&ps);
+    }
+
+    void ControlsPaint(){
+        if(!m_controlsWnd)return;PAINTSTRUCT ps{};HDC dc=BeginPaint(m_controlsWnd,&ps);if(!dc)return;RECT c{};GetClientRect(m_controlsWnd,&c);const int W=std::max<LONG>(1,c.right),H=std::max<LONG>(1,c.bottom);
+        HDC mem=CreateCompatibleDC(dc);HBITMAP bmp=CreateCompatibleBitmap(dc,W,H);HGDIOBJ old=SelectObject(mem,bmp);HBRUSH bg=CreateSolidBrush(RGB(24,25,29));FillRect(mem,&c,bg);DeleteObject(bg);
+        HGDIOBJ op=SelectObject(mem,GetStockObject(DC_PEN));SetDCPenColor(mem,RGB(57,60,66));MoveToEx(mem,0,0,nullptr);LineTo(mem,c.right,0);SelectObject(mem,op);
+        DrawButton(mem,ButtonRect(0),L"Open",false,m_hoverButton==0);DrawButton(mem,ButtonRect(1),L"\u23EA",false,m_hoverButton==1);DrawButton(mem,ButtonRect(2),m_playing?L"\u23F8":L"\u25B6",m_playing,m_hoverButton==2);DrawButton(mem,ButtonRect(3),L"\u23F9",false,m_hoverButton==3);DrawButton(mem,ButtonRect(4),L"\u23E9",false,m_hoverButton==4);
+        DrawButton(mem,ButtonRect(5),m_renderer&&m_renderer->DLSSEnabled()?L"DLSS ON":L"DLSS OFF",m_renderer&&m_renderer->DLSSEnabled(),m_hoverButton==5);DrawButton(mem,ButtonRect(6),m_fill?L"Crop":L"Fit",m_fill,m_hoverButton==6);DrawButton(mem,ButtonRect(7),L"Color",m_adjustWnd!=nullptr,m_hoverButton==7);DrawButton(mem,ButtonRect(8),L"Re-hook",false,m_hoverButton==8);
+        DrawButton(mem,ButtonRect(9),L"MV",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::MotionVectors,m_hoverButton==9);DrawButton(mem,ButtonRect(10),L"Depth",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::Depth,m_hoverButton==10);DrawButton(mem,ButtonRect(11),L"Mask",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::BiasMask,m_hoverButton==11);DrawButton(mem,ButtonRect(12),L"Full",m_fullscreen,m_hoverButton==12);DrawButton(mem,ButtonRect(13),L"Auto UI",m_fullscreenAutoHide,m_hoverButton==13);
+
+        RECT vr=VolumeRect();op=SelectObject(mem,GetStockObject(DC_PEN));SetDCPenColor(mem,RGB(94,98,105));MoveToEx(mem,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(mem,vr.right,(vr.top+vr.bottom)/2);SelectObject(mem,op);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));HGDIOBJ ob=SelectObject(mem,GetStockObject(DC_BRUSH));SelectObject(mem,GetStockObject(DC_PEN));SetDCBrushColor(mem,RGB(230,232,235));SetDCPenColor(mem,RGB(230,232,235));Ellipse(mem,vx-5,(vr.top+vr.bottom)/2-5,vx+5,(vr.top+vr.bottom)/2+5);SelectObject(mem,ob);
+        DrawButton(mem,MuteRect(),m_muted?L"Unmute":L"Mute",m_muted,m_hoverButton==100);
+
+        double shown=m_dragSeek?m_seekPreview:(m_seekPending?m_pendingSeekSec:Position());RECT tr=TimelineRect();HBRUSH tb=CreateSolidBrush(RGB(68,71,77));FillRect(mem,&tr,tb);DeleteObject(tb);double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;RECT done=tr;done.right=done.left+int((done.right-done.left)*f);HBRUSH db=CreateSolidBrush(RGB(55,139,226));FillRect(mem,&done,db);DeleteObject(db);int kx=done.right;ob=SelectObject(mem,GetStockObject(DC_BRUSH));SetDCBrushColor(mem,RGB(246,246,248));Ellipse(mem,kx-5,tr.top-3,kx+5,tr.bottom+3);SelectObject(mem,ob);
+
+        SetBkMode(mem,TRANSPARENT);SetTextColor(mem,RGB(202,205,211));auto of=SelectObject(mem,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+TimeText(d);TextOutW(mem,18,c.bottom-43,time.c_str(),int(time.size()));
+        std::wstringstream st;if(m_seeking||m_seekPending)st<<T(L"status.seeking")<<L"  |  ";st<<L"source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())st<<L" -> decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();st<<L"  |  "<<QualityNameW(m_activeQuality)<<L"  |  input "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L"  |  output "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L"  |  drop "<<m_droppedFrames;if(m_opticalFlow)st<<L"  |  NVOF "<<m_opticalFlow->GridSize()<<L"x";std::wstring status=st.str();RECT sr{145,c.bottom-48,std::max<LONG>(146,c.right-445),c.bottom-28};DrawTextW(mem,status.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
+        RECT fr=FpsRect();const double sourceFps=m_decoder.FrameRate();const bool fpsLow=m_submitFps>0.0&&sourceFps>0.0&&(m_submitFps+0.5<sourceFps);SetTextColor(mem,fpsLow?RGB(238,76,76):RGB(216,219,224));std::wstring fps=L"FPS "+std::to_wstring(int(std::lround(m_submitFps)))+L" / "+std::to_wstring(int(std::lround(sourceFps)));DrawTextW(mem,fps.c_str(),-1,&fr,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        SetTextColor(mem,RGB(202,205,211));std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");RECT vl{vr.left,vr.top-23,vr.right,vr.top-5};DrawTextW(mem,vol.c_str(),-1,&vl,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(mem,of);
+        BitBlt(dc,0,0,W,H,mem,0,0,SRCCOPY);SelectObject(mem,old);DeleteObject(bmp);DeleteDC(mem);EndPaint(m_controlsWnd,&ps);
+    }
+
+    void HandleFullscreenPointer(int x,int y){
+        if(!m_fullscreen||!m_loaded)return;m_lastFullscreenMouse=Clock::now();if(!m_fullscreenAutoHide)return;RECT c{};GetClientRect(m_hwnd,&c);if(m_fullscreenControlsHidden&&y>=c.bottom-96){m_fullscreenControlsHidden=false;Layout();InvalidateControls();}
+    }
+    void UpdateFullscreenUiVisibility(){
+        if(!m_fullscreen||!m_loaded||!m_controlsWnd)return;if(!m_fullscreenAutoHide){if(m_fullscreenControlsHidden){m_fullscreenControlsHidden=false;Layout();}return;}if(m_fullscreenControlsHidden||m_dragSeek||m_dragVolume)return;const double idle=std::chrono::duration<double>(Clock::now()-m_lastFullscreenMouse).count();if(idle>=2.5){m_fullscreenControlsHidden=true;Layout();}
+    }
+    void ToggleFullscreenAutoHide(){m_fullscreenAutoHide=!m_fullscreenAutoHide;m_lastFullscreenMouse=Clock::now();if(m_fullscreen&&!m_fullscreenAutoHide)m_fullscreenControlsHidden=false;SaveVideoSettings();Layout();InvalidateControls();}
+
+    static LRESULT CALLBACK ControlsWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l){
+        PlayerApp* a=nullptr;if(m==WM_NCCREATE){auto* cs=reinterpret_cast<CREATESTRUCTW*>(l);a=static_cast<PlayerApp*>(cs->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}else a=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));return a?a->ControlsWndProc(h,m,w,l):DefWindowProcW(h,m,w,l);
+    }
+    LRESULT ControlsWndProc(HWND h,UINT m,WPARAM w,LPARAM l){
+        switch(m){
+        case WM_ERASEBKGND:return 1;
+        case WM_PAINT:ControlsPaint();return 0;
+        case WM_MOUSEMOVE:{m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);m_lastFullscreenMouse=Clock::now();UpdateHover(m_mouseX,m_mouseY);if(m_dragSeek&&GetCapture()==h){m_seekPreview=SecondsFromX(m_mouseX);RECT dirty=TimelineRect();InvalidateRect(h,&dirty,FALSE);}if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);if(!m_trackingMouseLeave){TRACKMOUSEEVENT t{sizeof(t),TME_LEAVE,h,0};TrackMouseEvent(&t);m_trackingMouseLeave=true;}return 0;}
+        case WM_MOUSELEAVE:{m_trackingMouseLeave=false;int old=m_hoverButton;m_hoverButton=-1;m_mouseX=m_mouseY=-999;if(old!=-1){RECT r=HoverRect(old);InvalidateRect(h,&r,FALSE);}return 0;}
+        case WM_LBUTTONDOWN:ControlsMouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
+        case WM_LBUTTONUP:if(m_dragSeek){double target=m_seekPreview;m_dragSeek=false;if(GetCapture()==h)ReleaseCapture();RequestSeek(target);}else if(m_dragVolume){m_dragVolume=false;if(GetCapture()==h)ReleaseCapture();}return 0;
+        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;InvalidateRect(h,nullptr,FALSE);}if(m_dragVolume)m_dragVolume=false;return 0;
+        case WM_MOUSEWHEEL:return SendMessageW(m_hwnd,m,w,l);
         }
-        RECT bar{0,c.bottom-CONTROL_H,c.right,c.bottom};HBRUSH bg=CreateSolidBrush(RGB(27,28,31));FillRect(dc,&bar,bg);DeleteObject(bg);HPEN line=CreatePen(PS_SOLID,1,RGB(54,56,61));auto op=SelectObject(dc,line);MoveToEx(dc,0,bar.top,nullptr);LineTo(dc,c.right,bar.top);SelectObject(dc,op);DeleteObject(line);
-        const int widths[]={68,44,62,48,44,54,82,72,66,88,44,56,52,54};
-        DrawButton(dc,ButtonRect(0,widths[0]),T(L"button.open"));DrawButton(dc,ButtonRect(1,widths[1]),L"-10");DrawButton(dc,ButtonRect(2,widths[2]),m_playing?T(L"button.pause"):T(L"button.play"),m_playing);DrawButton(dc,ButtonRect(3,widths[3]),T(L"button.stop"));DrawButton(dc,ButtonRect(4,widths[4]),L"+10");DrawButton(dc,ButtonRect(5,widths[5]),m_muted?T(L"button.sound"):T(L"button.mute"),m_muted);DrawButton(dc,ButtonRect(6,widths[6]),m_renderer&&m_renderer->DLSSEnabled()?L"DLSS ON":L"DLSS OFF",m_renderer&&m_renderer->DLSSEnabled());DrawButton(dc,ButtonRect(7,widths[7]),m_fill?T(L"button.crop"):T(L"button.aspect"));DrawButton(dc,ButtonRect(8,widths[8]),T(L"button.color"),m_adjustWnd!=nullptr);DrawButton(dc,ButtonRect(9,widths[9]),T(L"button.rehook"));DrawButton(dc,ButtonRect(10,widths[10]),L"MV",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::MotionVectors);DrawButton(dc,ButtonRect(11,widths[11]),L"Depth",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::Depth);DrawButton(dc,ButtonRect(12,widths[12]),L"Mask",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::BiasMask);DrawButton(dc,ButtonRect(13,widths[13]),T(L"button.full"),m_fullscreen);
-        RECT vr=VolumeRect();HPEN vp=CreatePen(PS_SOLID,4,RGB(94,98,105));op=SelectObject(dc,vp);MoveToEx(dc,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(dc,vr.right,(vr.top+vr.bottom)/2);SelectObject(dc,op);DeleteObject(vp);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));HBRUSH vb=CreateSolidBrush(RGB(230,232,235));Ellipse(dc,vx-5,(vr.top+vr.bottom)/2-5,vx+5,(vr.top+vr.bottom)/2+5);DeleteObject(vb);
-        double shown=m_dragSeek?m_seekPreview:(m_seekPending?m_pendingSeekSec:Position());RECT tr=TimelineRect();HBRUSH tb=CreateSolidBrush(RGB(68,71,77));FillRect(dc,&tr,tb);DeleteObject(tb);double d=m_decoder.DurationSeconds(),f=d>0?std::clamp(shown/d,0.0,1.0):0;RECT done=tr;done.right=done.left+int((done.right-done.left)*f);HBRUSH db=CreateSolidBrush(RGB(55,139,226));FillRect(dc,&done,db);DeleteObject(db);int kx=done.right;HBRUSH kb=CreateSolidBrush(RGB(246,246,248));Ellipse(dc,kx-5,tr.top-3,kx+5,tr.bottom+3);DeleteObject(kb);
-        SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(206,208,212));auto of=SelectObject(dc,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+TimeText(d);TextOutW(dc,18,c.bottom-50,time.c_str(),int(time.size()));
-        std::wstringstream st;if(m_seeking||m_seekPending)st<<T(L"status.seeking")<<L"  |  ";st<<L"source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())st<<L" -> decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();st<<L"  |  "<<QualityNameW(m_activeQuality)<<L"  |  input "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L"  |  output "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L"  |  NGX create "<<(m_renderer->DLSSFeatureCreated()?L"OK":L"-")<<L"  "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L"  0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec<<L"  |  fps "<<int(std::lround(m_submitFps))<<L"/"<<int(std::lround(m_decoder.FrameRate()))<<L"  |  drop "<<m_droppedFrames<<L"  |  MV global "<<int(std::lround(m_lastGlobalX))<<L","<<int(std::lround(m_lastGlobalY));std::wstring status=st.str();RECT sr{145,c.bottom-53,c.right-205,c.bottom-34};DrawTextW(dc,status.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");TextOutW(dc,vr.right+8,vr.top-6,vol.c_str(),int(vol.size()));SelectObject(dc,of);
-        EndPaint(m_hwnd,&ps);
+        return DefWindowProcW(h,m,w,l);
     }
 
     void RegisterOverlayHotkeys(){
@@ -596,11 +715,12 @@ private:
     }
 
     void OpenFromDialog(){auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
-    void MouseDown(int x,int y){
-        SetFocus(m_hwnd);if(!m_loaded){if(PtIn(EmptyOpenRect(),x,y))OpenFromDialog();return;}if(m_seeking)return;
-        RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_seekPreview=SecondsFromX(x);SetCapture(m_hwnd);InvalidateRect(m_hwnd,nullptr,FALSE);return;}RECT vr=VolumeRect();if(PtIn(vr,x,y)){m_muted=false;m_dragVolume=true;SetCapture(m_hwnd);SetVolumeFromX(x);return;}
-        const int widths[]={68,44,62,48,44,54,82,72,66,88,44,56,52,54};if(PtIn(ButtonRect(0,widths[0]),x,y))OpenFromDialog();else if(PtIn(ButtonRect(1,widths[1]),x,y))RequestSeek(Position()-10);else if(PtIn(ButtonRect(2,widths[2]),x,y))TogglePause();else if(PtIn(ButtonRect(3,widths[3]),x,y))StopPlayback();else if(PtIn(ButtonRect(4,widths[4]),x,y))RequestSeek(Position()+10);else if(PtIn(ButtonRect(5,widths[5]),x,y))ToggleMute();else if(PtIn(ButtonRect(6,widths[6]),x,y))ToggleDLSS();else if(PtIn(ButtonRect(7,widths[7]),x,y)){m_fill=!m_fill;Layout();}else if(PtIn(ButtonRect(8,widths[8]),x,y))ShowAdjustments();else if(PtIn(ButtonRect(9,widths[9]),x,y))Rehook();else if(PtIn(ButtonRect(10,widths[10]),x,y))ToggleDebug(D3D12Renderer::DebugView::MotionVectors);else if(PtIn(ButtonRect(11,widths[11]),x,y))ToggleDebug(D3D12Renderer::DebugView::Depth);else if(PtIn(ButtonRect(12,widths[12]),x,y))ToggleDebug(D3D12Renderer::DebugView::BiasMask);else if(PtIn(ButtonRect(13,widths[13]),x,y))ToggleFullscreen();
+    void MouseDown(int x,int y){SetFocus(m_hwnd);if(!m_loaded&&PtIn(EmptyOpenRect(),x,y))OpenFromDialog();}
+    void ControlsMouseDown(int x,int y){
+        SetFocus(m_hwnd);if(!m_loaded||m_seeking)return;m_lastFullscreenMouse=Clock::now();RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_seekPreview=SecondsFromX(x);SetCapture(m_controlsWnd);InvalidateRect(m_controlsWnd,&tr,FALSE);return;}RECT vr=VolumeRect();if(PtIn(vr,x,y)){m_muted=false;m_dragVolume=true;SetCapture(m_controlsWnd);SetVolumeFromX(x);return;}if(PtIn(MuteRect(),x,y)){ToggleMute();return;}
+        const int b=HitTestButton(x,y);switch(b){case 0:OpenFromDialog();break;case 1:RequestSeek(Position()-10);break;case 2:TogglePause();break;case 3:StopPlayback();break;case 4:RequestSeek(Position()+10);break;case 5:ToggleDLSS();break;case 6:m_fill=!m_fill;Layout();break;case 7:ShowAdjustments();break;case 8:Rehook();break;case 9:ToggleDebug(D3D12Renderer::DebugView::MotionVectors);break;case 10:ToggleDebug(D3D12Renderer::DebugView::Depth);break;case 11:ToggleDebug(D3D12Renderer::DebugView::BiasMask);break;case 12:ToggleFullscreen();break;case 13:ToggleFullscreenAutoHide();break;}
     }
+
     double SecondsFromX(int x)const{RECT r=TimelineRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);double t=double(LONG(x)-r.left)/double(span);return std::clamp(t,0.0,1.0)*m_decoder.DurationSeconds();}
     void SetVolumeFromX(int x){RECT r=VolumeRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);m_volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));m_audio.SetVolume(m_volume);InvalidateControls();}
     void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateControls();}
@@ -610,7 +730,14 @@ private:
     void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
     void ToggleDebug(D3D12Renderer::DebugView v){if(!m_renderer)return;m_renderer->SetDebugView(m_renderer->GetDebugView()==v?D3D12Renderer::DebugView::Final:v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
-    void ToggleFullscreen(){if(!m_fullscreen){m_savedStyle=GetWindowLongW(m_hwnd,GWL_STYLE);GetWindowRect(m_hwnd,&m_savedRect);MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(m_hwnd,MONITOR_DEFAULTTONEAREST),&mi);SetWindowLongW(m_hwnd,GWL_STYLE,m_savedStyle&~(WS_CAPTION|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX|WS_SYSMENU));SetWindowPos(m_hwnd,HWND_TOP,mi.rcMonitor.left,mi.rcMonitor.top,mi.rcMonitor.right-mi.rcMonitor.left,mi.rcMonitor.bottom-mi.rcMonitor.top,SWP_FRAMECHANGED);m_fullscreen=true;}else{SetWindowLongW(m_hwnd,GWL_STYLE,m_savedStyle);SetWindowPos(m_hwnd,nullptr,m_savedRect.left,m_savedRect.top,m_savedRect.right-m_savedRect.left,m_savedRect.bottom-m_savedRect.top,SWP_NOZORDER|SWP_FRAMECHANGED);m_fullscreen=false;}Layout();}
+    void ToggleFullscreen(){
+        if(!m_fullscreen){
+            m_savedStyle=GetWindowLongW(m_hwnd,GWL_STYLE);GetWindowRect(m_hwnd,&m_savedRect);m_menuBar=GetMenu(m_hwnd);if(m_menuBar){SetMenu(m_hwnd,nullptr);DrawMenuBar(m_hwnd);}MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(m_hwnd,MONITOR_DEFAULTTONEAREST),&mi);SetWindowLongW(m_hwnd,GWL_STYLE,m_savedStyle&~(WS_CAPTION|WS_THICKFRAME|WS_MINIMIZEBOX|WS_MAXIMIZEBOX|WS_SYSMENU));m_fullscreen=true;m_fullscreenControlsHidden=m_fullscreenAutoHide;m_lastFullscreenMouse=Clock::now();SetWindowPos(m_hwnd,HWND_TOP,mi.rcMonitor.left,mi.rcMonitor.top,mi.rcMonitor.right-mi.rcMonitor.left,mi.rcMonitor.bottom-mi.rcMonitor.top,SWP_FRAMECHANGED);
+        }else{
+            m_fullscreen=false;m_fullscreenControlsHidden=false;SetWindowLongW(m_hwnd,GWL_STYLE,m_savedStyle);if(m_menuBar){SetMenu(m_hwnd,m_menuBar);DrawMenuBar(m_hwnd);}SetWindowPos(m_hwnd,nullptr,m_savedRect.left,m_savedRect.top,m_savedRect.right-m_savedRect.left,m_savedRect.bottom-m_savedRect.top,SWP_NOZORDER|SWP_FRAMECHANGED);
+        }
+        Layout();InvalidateControls();
+    }
 
     LRESULT WndProc(HWND h,UINT m,WPARAM w,LPARAM l){
         switch(m){
@@ -619,10 +746,8 @@ private:
         case WM_CLOSE:DestroyWindow(h);return 0;
         case WM_SIZE:Layout();return 0;
         case WM_PAINT:Paint();return 0;
-        case WM_MOUSEMOVE:m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(m_dragSeek&&GetCapture()==h)m_seekPreview=SecondsFromX(m_mouseX);if(m_dragVolume&&GetCapture()==h)SetVolumeFromX(m_mouseX);InvalidateControls();return 0;
+        case WM_MOUSEMOVE:{m_mouseX=GET_X_LPARAM(l);m_mouseY=GET_Y_LPARAM(l);if(m_loaded)HandleFullscreenPointer(m_mouseX,m_mouseY);else{RECT r=EmptyOpenRect();InvalidateRect(m_hwnd,&r,FALSE);}return 0;}
         case WM_LBUTTONDOWN:MouseDown(GET_X_LPARAM(l),GET_Y_LPARAM(l));return 0;
-        case WM_LBUTTONUP:if(m_dragSeek){double target=m_seekPreview;m_dragSeek=false;if(GetCapture()==h)ReleaseCapture();RequestSeek(target);}else if(m_dragVolume){m_dragVolume=false;if(GetCapture()==h)ReleaseCapture();}return 0;
-        case WM_CAPTURECHANGED:if(m_dragSeek){m_dragSeek=false;InvalidateRect(m_hwnd,nullptr,FALSE);}if(m_dragVolume)m_dragVolume=false;return 0;
         case WM_DROPFILES:{HDROP d=reinterpret_cast<HDROP>(w);wchar_t p[32768]{};UINT count=DragQueryFileW(d,0xFFFFFFFF,nullptr,0);if(count>0&&DragQueryFileW(d,0,p,static_cast<UINT>(std::size(p))))Load(p);DragFinish(d);return 0;}
         case WM_MOUSEWHEEL:{if(m_loaded){m_muted=false;float step=(GET_WHEEL_DELTA_WPARAM(w)>0)?0.05f:-0.05f;m_volume=std::clamp(m_volume+step,0.0f,1.0f);m_audio.SetVolume(m_volume);InvalidateControls();}return 0;}
         case WM_COMMAND:HandleCommand(LOWORD(w));return 0;
@@ -642,10 +767,10 @@ private:
         }
     }
 
-    AppOptions m_opt;Localizer m_loc;std::vector<std::wstring> m_languageCodes;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=NVSDK_NGX_PerfQuality_Value_MaxQuality;HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_adjustWnd=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr;
-    bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false;
-    LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999;
-    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;TemporalGuideGenerator m_guides;AudioPlayer m_audio;
+    AppOptions m_opt;Localizer m_loc;std::vector<std::wstring> m_languageCodes;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=NVSDK_NGX_PerfQuality_Value_MaxQuality;HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_controlsWnd=nullptr,m_tooltipWnd=nullptr,m_adjustWnd=nullptr;HMENU m_menuBar=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr;
+    bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_fullscreenAutoHide=true,m_fullscreenControlsHidden=false,m_trackingMouseLeave=false;
+    LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999,m_hoverButton=-1;
+    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now(),m_lastFullscreenMouse=Clock::now();double m_submitFps=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;std::unique_ptr<OpticalFlowEngine>m_opticalFlow;TemporalGuideGenerator m_guides;AudioPlayer m_audio;
     bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0,m_uiTick=0;
 };
 
