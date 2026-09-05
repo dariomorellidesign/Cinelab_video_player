@@ -1,4 +1,5 @@
 #include "D3D12Renderer.h"
+#include "SplitScreenLayout.h"
 #include "Log.h"
 #include <d3dcompiler.h>
 #include <algorithm>
@@ -424,6 +425,9 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     cmd->SetGraphicsRoot32BitConstants(1,12,presentParams,0);
     // DLSS inputs stay shader-readable for NGX. Only the texture selected for the
     // debug/fallback presentation pass is temporarily made pixel-shader readable.
+    if(m_splitScreen && m_debugView==DebugView::Final){
+        DrawSplitComparison(cmd,used);
+    }else{
     ID3D12Resource* debugPixelResource=nullptr;
     D3D12_RESOURCE_STATES debugBefore=GuideReadState;
     switch(m_debugView){
@@ -438,6 +442,7 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     cmd->DrawInstanced(3,1,0,0);
     if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
+    }
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close frame command list")) return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
@@ -448,6 +453,26 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     return true;
 }
 
+void D3D12Renderer::DrawSplitComparison(ID3D12GraphicsCommandList* cmd,bool dlssUsed){
+    // Step 04F: keep the FULL output viewport for both draws and clip only with
+    // scissors. This preserves exact spatial correspondence: left x is the same
+    // source/output coordinate as right x; neither half is horizontally squeezed.
+    const auto layout=ComputeSplitScreenLayout(m_outputW,0.5f);
+    const LONG splitX=LONG(layout.splitX);
+    D3D12_RECT left{0,0,splitX,LONG(m_outputH)};
+    D3D12_RECT right{splitX,0,LONG(m_outputW),LONG(m_outputH)};
+    D3D12_RECT full{0,0,LONG(m_outputW),LONG(m_outputH)};
+    Barrier(cmd,m_dlssColor.Get(),GuideReadState,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    cmd->SetPipelineState(m_psoPresent.Get());
+    cmd->RSSetScissorRects(1,&left);
+    cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(4)); // LEFT = pre-NGX input
+    cmd->DrawInstanced(3,1,0,0);
+    cmd->RSSetScissorRects(1,&right);
+    cmd->SetGraphicsRootDescriptorTable(0,dlssUsed?SRVGPU(1):SRVGPU(4)); // RIGHT = NGX/RenoDX output
+    cmd->DrawInstanced(3,1,0,0);
+    cmd->RSSetScissorRects(1,&full);
+    Barrier(cmd,m_dlssColor.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,GuideReadState);
+}
 bool D3D12Renderer::PresentCurrent(){
     if(!m_swapchain||!m_queue||!m_rootSig)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
@@ -471,6 +496,9 @@ bool D3D12Renderer::PresentCurrent(){
     float presentParams[12]={0,0,0,0,cs.brightness,cs.contrast,cs.saturation,cs.gamma,cs.temperature,cs.tint,0,0};
     cmd->SetGraphicsRoot32BitConstants(1,12,presentParams,0);
 
+    if(m_splitScreen && m_debugView==DebugView::Final){
+        DrawSplitComparison(cmd,m_lastDLSSUsed&&DLSSEnabled());
+    }else{
     ID3D12Resource* debugPixelResource=nullptr;
     D3D12_RESOURCE_STATES debugBefore=GuideReadState;
     switch(m_debugView){
@@ -489,6 +517,7 @@ bool D3D12Renderer::PresentCurrent(){
     if(debugPixelResource)Barrier(cmd,debugPixelResource,debugBefore,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     cmd->DrawInstanced(3,1,0,0);
     if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
+    }
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close static-present command list"))return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);

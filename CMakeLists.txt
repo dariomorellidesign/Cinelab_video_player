@@ -267,3 +267,6 @@ target_sources(DLSSVideoPlayer PRIVATE src/MaskDepthGuide.cpp)
 
 # Step 04E-2 scene-cut reset for soft Temporal Mask
 target_sources(DLSSVideoPlayer PRIVATE src/SceneCutDetector.cpp)
+
+# Step 04F synchronized split-screen comparator
+target_sources(DLSSVideoPlayer PRIVATE src/SplitScreenLayout.cpp)

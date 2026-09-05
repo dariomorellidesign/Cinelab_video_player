@@ -46,6 +46,8 @@ public:
     ID3D12Device* Device() const { return m_device.Get(); }
     void SetDebugView(DebugView v) { m_debugView = v; }
     DebugView GetDebugView() const { return m_debugView; }
+    void SetSplitScreen(bool enabled) { m_splitScreen = enabled; }
+    bool SplitScreenEnabled() const { return m_splitScreen; }
     void ResetAIDepthDebug() { m_aiDepthClearPending = true; m_aiDepthValid = false; m_aiHardwareDepthClearPending = true; m_aiHardwareDepthValid = false; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
     uint64_t FramesPresented() const { return m_framesPresented; }
@@ -69,6 +71,7 @@ private:
     static constexpr D3D12_RESOURCE_STATES DepthGuideReadState =
         D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
+    void DrawSplitComparison(ID3D12GraphicsCommandList* cmd, bool dlssUsed);
     bool CreateDeviceAndSwapchain(HWND hwnd);
     bool CreateHeapsAndBackbuffers();
     bool CreatePipelines();
@@ -176,5 +179,6 @@ private:
     DebugView m_debugView = DebugView::Final;
     ColorSettings m_colorSettings{};
     bool m_lastDLSSUsed = false;
+    bool m_splitScreen = false;
     DLSSBackend m_dlss;
 };

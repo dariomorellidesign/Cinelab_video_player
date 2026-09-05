@@ -52,6 +52,7 @@ enum : UINT {
     IDM_LANG_BASE=500
 };
 
+static constexpr UINT IDM_SPLIT_SCREEN = 380;
 
 static constexpr int HK_PLAY_PAUSE = 9001;
 static constexpr int HK_BACK_10 = 9002;
@@ -60,6 +61,7 @@ static constexpr int HK_MUTE = 9004;
 static constexpr int HK_DLSS = 9005;
 static constexpr int HK_MEDIA_PLAY_PAUSE = 9006;
 static constexpr int HK_ADJUSTMENTS = 9007;
+static constexpr int HK_SPLIT_SCREEN = 9008;
 
 static constexpr int IDC_ADJ_BRIGHTNESS = 7101;
 static constexpr int IDC_ADJ_CONTRAST = 7102;
@@ -163,6 +165,7 @@ static const wchar_t* DepthSourceNameW(D3D12Renderer::DepthSource s){
     switch(s){case D3D12Renderer::DepthSource::Flat:return L"Flat";case D3D12Renderer::DepthSource::AISynthetic:return L"AI Synthetic";default:return L"Legacy";}
 }
 class PlayerApp {
+    bool m_splitScreen=false;
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)){}
     ~PlayerApp(){SaveVideoSettings();if(m_adjustWnd)DestroyWindow(m_adjustWnd);UnregisterOverlayHotkeys();Unload(); if(m_font)DeleteObject(m_font); if(m_fontSmall)DeleteObject(m_fontSmall);}
@@ -308,7 +311,7 @@ private:
 
     void ApplyVideoAdjustments(bool refreshPaused=true){
         if(m_renderer){
-            m_renderer->SetColorSettings(m_colorSettings);
+            m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetSplitScreen(m_splitScreen);
             if(refreshPaused&&!m_playing&&!m_seeking)m_renderer->PresentCurrent();
         }
     }
@@ -516,6 +519,7 @@ private:
         AppendMenuW(nvof,MF_POPUP,reinterpret_cast<UINT_PTR>(nvofPerf),L"Preset");AppendMenuW(nvof,MF_POPUP,reinterpret_cast<UINT_PTR>(nvofGrid),L"Grid");
         add(dlss,IDM_DLSS,L"menu.dlss_toggle"); add(dlss,IDM_REHOOK,L"menu.rehook"); AppendMenuW(depthSource,MF_STRING,IDM_DEPTH_SOURCE_LEGACY,L"Legacy Estimated");AppendMenuW(depthSource,MF_STRING,IDM_DEPTH_SOURCE_FLAT,L"Flat 0.75");AppendMenuW(depthSource,MF_STRING,IDM_DEPTH_SOURCE_AI,L"AI Synthetic");
         AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(depthSource),L"Depth Source (NGX)"); std::wstring qualityName=T(L"menu.quality"); AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(quality),qualityName.c_str()); AppendMenuW(dlss,MF_POPUP,reinterpret_cast<UINT_PTR>(nvof),L"Optical Flow (NVOF)");
+        AppendMenuW(dlss,MF_STRING|(m_splitScreen?MF_CHECKED:MF_UNCHECKED),IDM_SPLIT_SCREEN,L"Split Screen: DLSS OFF | ON");
         m_languageCodes.clear();
         std::wstring sFile=T(L"menu.file"),sPlay=T(L"menu.playback"),sVideo=T(L"menu.video"),sDlss=T(L"menu.dlss");
         AppendMenuW(bar,MF_POPUP,reinterpret_cast<UINT_PTR>(file),sFile.c_str());
@@ -569,7 +573,7 @@ private:
         ShowWindow(m_viewport,SW_SHOW); Layout();
         m_renderer=std::make_unique<D3D12Renderer>();
         if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)){std::wstring e=T(L"error.renderer"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);m_renderer.reset();m_decoder.Close();ShowWindow(m_viewport,SW_HIDE);return false;}
-        m_renderer->SetColorSettings(m_colorSettings);
+        m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetSplitScreen(m_splitScreen);
         m_renderer->SetDepthSource(m_opt.depthSource);
         m_guides.SetOutputGrid(guideW,guideH);
         m_opticalFlow.reset();
@@ -948,11 +952,12 @@ private:
         reg(HK_MUTE,MOD_CONTROL|MOD_ALT,'M',"Ctrl+Alt+M");
         reg(HK_DLSS,MOD_CONTROL|MOD_ALT,'D',"Ctrl+Alt+D");
         reg(HK_ADJUSTMENTS,MOD_CONTROL|MOD_ALT,'C',"Ctrl+Alt+C");
+        reg(HK_SPLIT_SCREEN,MOD_CONTROL|MOD_ALT,'S',"Ctrl+Alt+S");
         if(!RegisterHotKey(m_hwnd,HK_MEDIA_PLAY_PAUSE,MOD_NOREPEAT,VK_MEDIA_PLAY_PAUSE))LOG("Media Play/Pause hotkey unavailable winerr="<<GetLastError());
     }
-    void UnregisterOverlayHotkeys(){if(!m_hwnd)return;for(int id:{HK_PLAY_PAUSE,HK_BACK_10,HK_FORWARD_10,HK_MUTE,HK_DLSS,HK_ADJUSTMENTS,HK_MEDIA_PLAY_PAUSE})UnregisterHotKey(m_hwnd,id);}
+    void UnregisterOverlayHotkeys(){if(!m_hwnd)return;for(int id:{HK_PLAY_PAUSE,HK_BACK_10,HK_FORWARD_10,HK_MUTE,HK_DLSS,HK_ADJUSTMENTS,HK_SPLIT_SCREEN,HK_MEDIA_PLAY_PAUSE})UnregisterHotKey(m_hwnd,id);}
     void HandleHotkey(int id){
-        switch(id){case HK_PLAY_PAUSE:case HK_MEDIA_PLAY_PAUSE:TogglePause();break;case HK_BACK_10:RequestSeek(Position()-10);break;case HK_FORWARD_10:RequestSeek(Position()+10);break;case HK_MUTE:ToggleMute();break;case HK_DLSS:ToggleDLSS();break;case HK_ADJUSTMENTS:ShowAdjustments();break;}
+        switch(id){case HK_PLAY_PAUSE:case HK_MEDIA_PLAY_PAUSE:TogglePause();break;case HK_BACK_10:RequestSeek(Position()-10);break;case HK_FORWARD_10:RequestSeek(Position()+10);break;case HK_MUTE:ToggleMute();break;case HK_DLSS:ToggleDLSS();break;case HK_ADJUSTMENTS:ShowAdjustments();break;case HK_SPLIT_SCREEN:ToggleSplitScreen();break;}
     }
 
     void OpenFromDialog(){auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
@@ -966,6 +971,13 @@ private:
     void SetVolumeFromX(int x){RECT r=VolumeRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);m_volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));m_audio.SetVolume(m_volume);InvalidateControls();}
     void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateControls();}
     void ToggleDLSS(){if(!m_renderer)return;m_renderer->SetDLSS(!m_renderer->DLSSEnabled());m_dlssReset=true;if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
+    void ToggleSplitScreen(){
+        m_splitScreen=!m_splitScreen;
+        if(m_renderer){m_renderer->SetSplitScreen(m_splitScreen);if(!m_playing)m_renderer->PresentCurrent();}
+        if(m_hwnd){HMENU bar=GetMenu(m_hwnd);if(bar)CheckMenuItem(bar,IDM_SPLIT_SCREEN,MF_BYCOMMAND|(m_splitScreen?MF_CHECKED:MF_UNCHECKED));}
+        LOG("[Split Screen] "<<(m_splitScreen?"ON left=DLSS_OFF right=DLSS_NR_ON":"OFF")<<" spatial=same-frame/full-viewport-scissor");
+        InvalidateControls();UpdateTitle();
+    }
     void Rehook(){if(m_renderer){m_renderer->RequestDLSSRecreate();m_dlssReset=true;}}
     void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){std::wstring p=m_path;double keep=Position();bool wasPlaying=m_playing;if(Load(p))RequestSeek(keep,wasPlaying);}}
     void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
@@ -1002,6 +1014,7 @@ private:
     void HandleCommand(UINT id){
         const UINT langEnd=IDM_LANG_BASE+static_cast<UINT>(m_languageCodes.size());if(id>=IDM_LANG_BASE && id<langEnd){ApplyLanguage(m_languageCodes[id-IDM_LANG_BASE]);return;}
         switch(id){
+        case IDM_SPLIT_SCREEN:ToggleSplitScreen();break;
         case IDM_OPEN:OpenFromDialog();break;case IDM_EXIT:DestroyWindow(m_hwnd);break;case IDM_PLAY:TogglePause();break;case IDM_STOP:StopPlayback();break;case IDM_BACK10:RequestSeek(Position()-10);break;case IDM_FWD10:RequestSeek(Position()+10);break;case IDM_MUTE:ToggleMute();break;case IDM_DLSS:ToggleDLSS();break;case IDM_REHOOK:Rehook();break;
         case IDM_DEPTH_SOURCE_LEGACY:SetDepthSource(D3D12Renderer::DepthSource::Legacy);break;case IDM_DEPTH_SOURCE_FLAT:SetDepthSource(D3D12Renderer::DepthSource::Flat);break;case IDM_DEPTH_SOURCE_AI:SetDepthSource(D3D12Renderer::DepthSource::AISynthetic);break;        case IDM_NVOF_PERF_SLOW:SetNvofPerf(L"slow");break;case IDM_NVOF_PERF_MEDIUM:SetNvofPerf(L"medium");break;case IDM_NVOF_PERF_FAST:SetNvofPerf(L"fast");break;
         case IDM_NVOF_GRID_AUTO:SetNvofGrid(L"auto");break;case IDM_NVOF_GRID_1:SetNvofGrid(L"1");break;case IDM_NVOF_GRID_2:SetNvofGrid(L"2");break;case IDM_NVOF_GRID_4:SetNvofGrid(L"4");break;        case IDM_QUALITY_AUTO:SetQualityMode(true,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_QUALITY:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxQuality);break;case IDM_QUALITY_BALANCED:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_Balanced);break;case IDM_QUALITY_PERFORMANCE:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_MaxPerf);break;case IDM_QUALITY_ULTRAPERF:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_UltraPerformance);break;case IDM_QUALITY_DLAA:SetQualityMode(false,NVSDK_NGX_PerfQuality_Value_DLAA);break;
