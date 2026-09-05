@@ -17,6 +17,32 @@ struct OpticalFlowFrame {
     bool valid = false;
 };
 
+struct OpticalFlowStats {
+    uint64_t calls = 0;
+    uint64_t pairs = 0;
+    double lastUploadMs = 0.0;
+    double lastExecuteMs = 0.0;
+    double lastDownloadMs = 0.0;
+    double lastConvertMs = 0.0;
+    double lastStabilizeMs = 0.0;
+    double lastTotalMs = 0.0;
+    double emaUploadMs = 0.0;
+    double emaExecuteMs = 0.0;
+    double emaDownloadMs = 0.0;
+    double emaConvertMs = 0.0;
+    double emaStabilizeMs = 0.0;
+    double emaTotalMs = 0.0;
+    bool filmStabilizationEnabled = false;
+    bool filmPerformanceBypass = false;
+    float filmNoisePx = 0.0f;
+    float filmCorrectedPct = 0.0f;
+    float filmSnappedPct = 0.0f;
+    float filmMeanCorrectionPx = 0.0f;
+    float filmMaxCorrectionPx = 0.0f;
+    float filmCenterMotionX = 0.0f;
+    float filmCenterMotionY = 0.0f;
+};
+
 class OpticalFlowEngine {
 public:
     OpticalFlowEngine();
@@ -27,8 +53,8 @@ public:
 
     static bool RuntimeAvailable();
 
-    bool Initialize(ID3D12Device* device, uint32_t width, uint32_t height,
-                    uint32_t preferredGridSize = 2);
+    bool Initialize(ID3D12Device* device, uint32_t width,
+                    uint32_t height, uint32_t preferredGridSize = 2);
     void Shutdown();
     void Reset();
 
@@ -39,6 +65,9 @@ public:
     uint32_t GridSize() const;
     uint32_t GridW() const;
     uint32_t GridH() const;
+    const char* PerfName() const;
+    bool FilmStabilizationEnabled() const;
+    OpticalFlowStats GetStats() const;
 
 private:
     struct Impl;

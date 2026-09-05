@@ -1,9 +1,14 @@
 #include "OpticalFlowEngine.h"
+#include "FilmMotionStabilizer.h"
 
 #include <windows.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <chrono>
+#include <cctype>
+#include <cstdlib>
 #include <sstream>
+#include <string>
 #include <utility>
 
 #include "NvOFD3D12.h"
@@ -11,6 +16,7 @@
 #include "Log.h"
 
 using Microsoft::WRL::ComPtr;
+using OfClock = std::chrono::steady_clock;
 
 namespace {
 
@@ -52,6 +58,67 @@ void ReleaseFencePoint(NV_OF_FENCE_POINT& point) {
     point.value = 0;
 }
 
+std::string LowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+std::string ReadEnvAscii(const char* name) {
+    char buffer[128]{};
+    const DWORD n = GetEnvironmentVariableA(name, buffer, static_cast<DWORD>(sizeof(buffer)));
+    if (!n || n >= sizeof(buffer)) return {};
+    return std::string(buffer, buffer + n);
+}
+
+struct PerfChoice {
+    NV_OF_PERF_LEVEL level = NV_OF_PERF_LEVEL_SLOW;
+    const char* name = "SLOW";
+};
+
+PerfChoice ResolvePerfChoice() {
+    // Step 04B-5: MEDIUM is the normal player default. SLOW/FAST remain explicit A/B choices.
+    const std::string requested = LowerAscii(ReadEnvAscii("DMP_NVOF_PERF"));
+    if (requested == "slow" || requested == "0")
+        return {NV_OF_PERF_LEVEL_SLOW, "SLOW"};
+    if (requested == "fast" || requested == "20")
+        return {NV_OF_PERF_LEVEL_FAST, "FAST"};
+    return {NV_OF_PERF_LEVEL_MEDIUM, "MEDIUM"};
+}
+
+bool ResolveFilmStabilization(std::string& modeName) {
+    const std::string requested = LowerAscii(ReadEnvAscii("DMP_NVOF_FILM_STABILIZE"));
+    if (requested == "off" || requested == "0" || requested == "false" || requested == "raw") {
+        modeName = "OFF_RAW";
+        return false;
+    }
+    modeName = "AUTO_FILM_GRAIN";
+    return true;
+}
+
+uint32_t ResolveGridChoice(uint32_t preferredGrid, uint32_t width, uint32_t height,
+                           std::string& policyName) {
+    // Step 04B-5 AUTO grid policy: keep the validated 2x2 path for normal video,
+    // but avoid a 2M-vector field on true 4K-class NVOFA inputs. Manual 1/2/4 override AUTO.
+    const std::string requested = LowerAscii(ReadEnvAscii("DMP_NVOF_GRID"));
+    if (requested.empty() || requested == "auto") {
+        policyName = "AUTO";
+        const uint64_t pixels = uint64_t(width) * uint64_t(height);
+        return pixels >= 6000000ull ? 4u : std::max(1u, preferredGrid);
+    }
+    if (requested == "1" || requested == "1x1") { policyName = "MANUAL_1X1"; return 1u; }
+    if (requested == "2" || requested == "2x2") { policyName = "MANUAL_2X2"; return 2u; }
+    if (requested == "4" || requested == "4x4") { policyName = "MANUAL_4X4"; return 4u; }
+    policyName = "AUTO_INVALID_FALLBACK";
+    const uint64_t pixels = uint64_t(width) * uint64_t(height);
+    return pixels >= 6000000ull ? 4u : std::max(1u, preferredGrid);
+}
+
+inline double MsBetween(OfClock::time_point a, OfClock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+}
+
 } // namespace
 
 struct OpticalFlowEngine::Impl {
@@ -61,6 +128,10 @@ struct OpticalFlowEngine::Impl {
     uint32_t gridSize = 0;
     uint32_t gridW = 0;
     uint32_t gridH = 0;
+    std::string perfName = "SLOW";
+    std::string filmModeName = "AUTO_FILM_GRAIN";
+    bool filmStabilizationEnabled = true;
+    FilmMotionStabilizer filmStabilizer;
 
     NvOFObj flow;
     std::vector<ComPtr<ID3D12Resource>> inputResources;
@@ -75,6 +146,7 @@ struct OpticalFlowEngine::Impl {
     uint32_t previousIndex = 0;
     bool havePrevious = false;
     bool disableHintsOnNextPair = true;
+    OpticalFlowStats stats{};
 
     ~Impl() {
         Shutdown();
@@ -90,15 +162,81 @@ struct OpticalFlowEngine::Impl {
         ReleaseFencePoint(appFence);
         ReleaseFencePoint(ofaFence);
         hostFlow.clear();
+        filmStabilizer.Reset();
         havePrevious = false;
         device = nullptr;
         width = height = gridSize = gridW = gridH = 0;
+        perfName = "SLOW";
+        filmModeName = "AUTO_FILM_GRAIN";
+        filmStabilizationEnabled = true;
+        stats = {};
     }
 
     void ResetHistory() {
         havePrevious = false;
         previousIndex = 0;
         disableHintsOnNextPair = true;
+        filmStabilizer.Reset();
+    }
+
+    void UpdatePairStats(double uploadMs, double executeMs, double downloadMs,
+                         double convertMs, double stabilizeMs, double totalMs,
+                         const FilmMotionStabilizationStats& filmStats) {
+        ++stats.calls;
+        ++stats.pairs;
+        stats.lastUploadMs = uploadMs;
+        stats.lastExecuteMs = executeMs;
+        stats.lastDownloadMs = downloadMs;
+        stats.lastConvertMs = convertMs;
+        stats.lastStabilizeMs = stabilizeMs;
+        stats.lastTotalMs = totalMs;
+        stats.filmStabilizationEnabled = filmStabilizationEnabled;
+        stats.filmPerformanceBypass = filmStats.performanceBypass;
+        stats.filmNoisePx = filmStats.robustNoisePx;
+        stats.filmCorrectedPct = filmStats.correctedPct;
+        stats.filmSnappedPct = filmStats.snappedPct;
+        stats.filmMeanCorrectionPx = filmStats.meanCorrectionPx;
+        stats.filmMaxCorrectionPx = filmStats.maxCorrectionPx;
+        stats.filmCenterMotionX = filmStats.centerMotionX;
+        stats.filmCenterMotionY = filmStats.centerMotionY;
+        const double a = 0.10;
+        if (stats.pairs == 1u) {
+            stats.emaUploadMs = uploadMs;
+            stats.emaExecuteMs = executeMs;
+            stats.emaDownloadMs = downloadMs;
+            stats.emaConvertMs = convertMs;
+            stats.emaStabilizeMs = stabilizeMs;
+            stats.emaTotalMs = totalMs;
+        } else {
+            stats.emaUploadMs = stats.emaUploadMs * (1.0 - a) + uploadMs * a;
+            stats.emaExecuteMs = stats.emaExecuteMs * (1.0 - a) + executeMs * a;
+            stats.emaDownloadMs = stats.emaDownloadMs * (1.0 - a) + downloadMs * a;
+            stats.emaConvertMs = stats.emaConvertMs * (1.0 - a) + convertMs * a;
+            stats.emaStabilizeMs = stats.emaStabilizeMs * (1.0 - a) + stabilizeMs * a;
+            stats.emaTotalMs = stats.emaTotalMs * (1.0 - a) + totalMs * a;
+        }
+
+        if (stats.pairs <= 3u || (stats.pairs % 60u) == 0u) {
+            LOG("[NVOF Perf] mode=" << perfName
+                << " grid=" << gridSize
+                << " pair=" << stats.pairs
+                << " uploadMs=" << uploadMs
+                << " executeMs=" << executeMs
+                << " downloadMs=" << downloadMs
+                << " convertMs=" << convertMs
+                << " stabilizeMs=" << stabilizeMs
+                << " totalMs=" << totalMs
+                << " emaTotalMs=" << stats.emaTotalMs);
+            LOG("[NVOF Film] mode=" << filmModeName
+                << " model=" << (filmStats.performanceBypass ? "PERF_BYPASS" : (filmStats.modelValid ? "AFFINE" : "BYPASS"))
+                << " noisePx=" << filmStats.robustNoisePx
+                << " correctedPct=" << filmStats.correctedPct
+                << " snappedPct=" << filmStats.snappedPct
+                << " meanCorrectionPx=" << filmStats.meanCorrectionPx
+                << " maxCorrectionPx=" << filmStats.maxCorrectionPx
+                << " centerMotion=(" << filmStats.centerMotionX << "," << filmStats.centerMotionY << ")"
+                << " history=" << (filmStats.usedHistory ? 1 : 0));
+        }
     }
 
     bool Initialize(ID3D12Device* newDevice, uint32_t w, uint32_t h,
@@ -110,13 +248,19 @@ struct OpticalFlowEngine::Impl {
         width = w;
         height = h;
 
+        const PerfChoice perf = ResolvePerfChoice();
+        perfName = perf.name;
+        filmStabilizationEnabled = ResolveFilmStabilization(filmModeName);
+        std::string gridPolicy;
+        const uint32_t requestedGrid = ResolveGridChoice(std::max(1u, preferredGrid), width, height, gridPolicy);
+
         flow = NvOFD3D12::Create(device, width, height,
                                  NV_OF_BUFFER_FORMAT_ABGR8,
                                  NV_OF_MODE_OPTICALFLOW,
-                                 NV_OF_PERF_LEVEL_SLOW);
+                                 perf.level);
         if (!flow) return false;
 
-        uint32_t selectedGrid = std::max(1u, preferredGrid);
+        uint32_t selectedGrid = requestedGrid;
         if (!flow->CheckGridSize(selectedGrid)) {
             uint32_t nextGrid = 0;
             if (!flow->GetNextMinGridSize(selectedGrid, nextGrid)) {
@@ -165,10 +309,13 @@ struct OpticalFlowEngine::Impl {
         ResetHistory();
 
         LOG("[NVOF] Initialized D3D12: input=" << width << "x" << height
-            << " requestedGrid=" << preferredGrid
+            << " gridPolicy=" << gridPolicy
+            << " requestedGrid=" << requestedGrid
             << " hwGrid=" << gridSize
             << " output=" << gridW << "x" << gridH
-            << " perf=SLOW");
+            << " perf=" << perfName
+            << " filmStabilize=" << filmModeName
+            << " envPerf=" << (ReadEnvAscii("DMP_NVOF_PERF").empty() ? "default" : ReadEnvAscii("DMP_NVOF_PERF")));
         return true;
     }
 
@@ -178,18 +325,33 @@ struct OpticalFlowEngine::Impl {
         if (!flow || !bgra || bytes < size_t(width) * height * 4u) return false;
         if (reset) ResetHistory();
 
+        const auto totalStart = OfClock::now();
+
         if (!havePrevious) {
             previousIndex = 0;
+            const auto uploadStart = OfClock::now();
             ++appFence.value;
             inputBuffers[previousIndex]->UploadData(bgra, &ofaFence, &appFence);
+            const auto uploadEnd = OfClock::now();
             havePrevious = true;
+            ++stats.calls;
+            stats.lastUploadMs = MsBetween(uploadStart, uploadEnd);
+            stats.lastExecuteMs = 0.0;
+            stats.lastDownloadMs = 0.0;
+            stats.lastConvertMs = 0.0;
+            stats.lastStabilizeMs = 0.0;
+            stats.lastTotalMs = MsBetween(totalStart, uploadEnd);
+            stats.filmStabilizationEnabled = filmStabilizationEnabled;
             return true;
         }
 
         const uint32_t currentIndex = 1u - previousIndex;
+        const auto uploadStart = OfClock::now();
         ++appFence.value;
         inputBuffers[currentIndex]->UploadData(bgra, &ofaFence, &appFence);
+        const auto uploadEnd = OfClock::now();
 
+        const auto executeStart = uploadEnd;
         ++ofaFence.value;
         flow->Execute(inputBuffers[currentIndex].get(),
                       inputBuffers[previousIndex].get(),
@@ -197,23 +359,47 @@ struct OpticalFlowEngine::Impl {
                       nullptr, nullptr, 0, nullptr,
                       &appFence, 1, &ofaFence,
                       disableHintsOnNextPair ? NV_OF_TRUE : NV_OF_FALSE);
+        const auto executeEnd = OfClock::now();
 
+        const auto downloadStart = executeEnd;
         outputBuffer->DownloadData(hostFlow.data(), &ofaFence);
+        const auto downloadEnd = OfClock::now();
         disableHintsOnNextPair = false;
         previousIndex = currentIndex;
 
+        const auto convertStart = downloadEnd;
         out.motionXY.resize(size_t(gridW) * gridH * 2u);
         for (size_t i = 0; i < hostFlow.size(); ++i) {
             // NVIDIA Optical Flow uses signed S10.5: divide by 32 for pixels.
             out.motionXY[i * 2u + 0u] = float(hostFlow[i].flowx) / 32.0f;
             out.motionXY[i * 2u + 1u] = float(hostFlow[i].flowy) / 32.0f;
         }
+        const auto convertEnd = OfClock::now();
+
+        FilmMotionStabilizationStats filmStats{};
+        const auto stabilizeStart = convertEnd;
+        if (filmStabilizationEnabled) {
+            filmStabilizer.Process(out.motionXY, gridW, gridH, true, &filmStats);
+        } else {
+            filmStabilizer.Reset();
+            filmStats.enabled = false;
+        }
+        const auto stabilizeEnd = OfClock::now();
+
         out.gridW = gridW;
         out.gridH = gridH;
         out.gridSize = gridSize;
         out.sourceW = width;
         out.sourceH = height;
         out.valid = true;
+
+        UpdatePairStats(MsBetween(uploadStart, uploadEnd),
+                        MsBetween(executeStart, executeEnd),
+                        MsBetween(downloadStart, downloadEnd),
+                        MsBetween(convertStart, convertEnd),
+                        MsBetween(stabilizeStart, stabilizeEnd),
+                        MsBetween(totalStart, stabilizeEnd),
+                        filmStats);
         return true;
     }
 };
@@ -283,3 +469,6 @@ bool OpticalFlowEngine::Available() const { return m_impl != nullptr; }
 uint32_t OpticalFlowEngine::GridSize() const { return m_impl ? m_impl->gridSize : 0; }
 uint32_t OpticalFlowEngine::GridW() const { return m_impl ? m_impl->gridW : 0; }
 uint32_t OpticalFlowEngine::GridH() const { return m_impl ? m_impl->gridH : 0; }
+const char* OpticalFlowEngine::PerfName() const { return m_impl ? m_impl->perfName.c_str() : "OFF"; }
+bool OpticalFlowEngine::FilmStabilizationEnabled() const { return m_impl ? m_impl->filmStabilizationEnabled : false; }
+OpticalFlowStats OpticalFlowEngine::GetStats() const { return m_impl ? m_impl->stats : OpticalFlowStats{}; }

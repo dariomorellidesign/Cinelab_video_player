@@ -28,8 +28,10 @@ D3D12Renderer::~D3D12Renderer() {
     for (uint32_t i=0;i<FrameCount;++i) {
         if (m_upload[i] && m_uploadMapped[i]) m_upload[i]->Unmap(0,nullptr);
         if (m_guideUpload[i] && m_guideMapped[i]) m_guideUpload[i]->Unmap(0,nullptr);
+        if (m_aiDepthUpload[i] && m_aiDepthMapped[i]) m_aiDepthUpload[i]->Unmap(0,nullptr);
         m_uploadMapped[i]=nullptr;
         m_guideMapped[i]=nullptr;
+        m_aiDepthMapped[i]=nullptr;
     }
     m_dlss.Shutdown();
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
@@ -87,10 +89,10 @@ bool D3D12Renderer::CreateHeapsAndBackbuffers(){
     D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+3;
     if(!HR(m_device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&m_rtvHeap)),"Create RTV heap"))return false;m_rtvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     for(uint32_t i=0;i<FrameCount;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
-    D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=7;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=10;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(!HR(m_device->CreateDescriptorHeap(&sh,IID_PPV_ARGS(&m_srvHeap)),"Create SRV heap"))return false;
     m_srvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    D3D12_DESCRIPTOR_HEAP_DESC dh{};dh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;dh.NumDescriptors=1;
+    D3D12_DESCRIPTOR_HEAP_DESC dh{};dh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;dh.NumDescriptors=3;
     if(!HR(m_device->CreateDescriptorHeap(&dh,IID_PPV_ARGS(&m_dsvHeap)),"Create DSV heap"))return false;
     m_dsvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
     return true;
@@ -130,17 +132,27 @@ float3 ApplyVideoAdjustments(float3 c){
 }
 float4 PSPresent(V i):SV_Target{float3 c=T.SampleLevel(S,i.uv,0).rgb;c=ApplyVideoAdjustments(c);return float4(LinearToSRGB(c),1);}
 float3 hsv2rgb(float3 c){float4 K=float4(1,2.0/3.0,1.0/3.0,3);float3 p=abs(frac(c.xxx+K.xyz)*6-K.www);return c.z*lerp(K.xxx,saturate(p-K.xxx),c.y);}
-float4 PSMotion(V i):SV_Target{float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=length(m);float h=frac(atan2(-m.y,m.x)/6.2831853+1.0);float v=saturate(0.22+mag/24.0);float3 c=hsv2rgb(float3(h,saturate(mag/1.0),v));return float4(c,1);}
+float4 PSMotion(V i):SV_Target{
+    float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=length(m);
+    // MV debug dead-zone: hardware optical flow naturally contains tiny sub-pixel
+    // estimates on nominally static regions. Do not turn those into colored snow.
+    const float dead=0.20;if(mag<dead)return float4(0.035,0.035,0.035,1);
+    float h=frac(atan2(-m.y,m.x)/6.2831853+1.0);
+    float sat=saturate((mag-dead)/1.25);float v=saturate(0.18+(mag-dead)/14.0);
+    return float4(hsv2rgb(float3(h,sat,v)),1);
+}
 float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(d,0.7);return float4(d,d,d,1);}
+float4 PSAIHardwareDepthDebug(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);return float4(d,d,d,1);}
+float PSAIHardwareDepthWrite(V i):SV_Depth{float relativeNearness=saturate(T.SampleLevel(S,i.uv,0).r);return 1.0-relativeNearness;}
     // Depth comes directly from compact-guide B and is written through SV_Depth into
     // the exact typeless/D32 resource that NGX receives later in the frame.
     float PSWriteDepth(V i):SV_Depth{return saturate(T.SampleLevel(S,i.uv+JitterUV,0).b);}
     struct GuideOut{float2 mv:SV_Target0;float bias:SV_Target1;};
-    GuideOut PSExpandGuides(V i){float4 g=T.SampleLevel(S,i.uv+JitterUV,0);GuideOut o;o.mv=g.xy;o.bias=g.w>=0.5?1.0:0.0;return o;}
+    GuideOut PSExpandGuides(V i){float4 g=T.SampleLevel(S,i.uv+JitterUV,0);GuideOut o;o.mv=g.xy;o.bias=saturate(g.w);return o;}
 )";
-    UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,depthWrite,expand,err;
+    UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,aiHwDepthDebug,aiHwDepthWrite,depthWrite,expand,err;
     auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(hlsl,strlen(hlsl),nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
-    if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand))return false;
+    if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSAIHardwareDepthDebug","ps_5_1",aiHwDepthDebug)||!C("PSAIHardwareDepthWrite","ps_5_1",aiHwDepthWrite)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand))return false;
     D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=1;range.BaseShaderRegister=0;
     D3D12_ROOT_PARAMETER rp[2]{};rp[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[0].DescriptorTable.NumDescriptorRanges=1;rp[0].DescriptorTable.pDescriptorRanges=&range;
     rp[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;rp[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[1].Constants.Num32BitValues=12;rp[1].Constants.ShaderRegister=0;
@@ -159,12 +171,14 @@ float4 PSDepth(V i):SV_Target{float d=saturate(T.SampleLevel(S,i.uv,0).r);d=pow(
     p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresent)),"Create present PSO"))return false;
     p.PS={motion->GetBufferPointer(),motion->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoMotionDebug)),"Create MV debug PSO"))return false;
     p.PS={depth->GetBufferPointer(),depth->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthDebug)),"Create depth debug PSO"))return false;
+    p.PS={aiHwDepthDebug->GetBufferPointer(),aiHwDepthDebug->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoAIHardwareDepthDebug)),"Create AI hardware depth debug PSO"))return false;
     p.PS={expand->GetBufferPointer(),expand->GetBufferSize()};p.NumRenderTargets=2;p.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;p.RTVFormats[1]=DXGI_FORMAT_R8_UNORM;p.RTVFormats[2]=DXGI_FORMAT_UNKNOWN;
     if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoExpandGuides)),"Create GPU guide expansion PSO"))return false;
     p.PS={depthWrite->GetBufferPointer(),depthWrite->GetBufferSize()};
     p.NumRenderTargets=0;p.RTVFormats[0]=DXGI_FORMAT_UNKNOWN;p.RTVFormats[1]=DXGI_FORMAT_UNKNOWN;p.RTVFormats[2]=DXGI_FORMAT_UNKNOWN;p.DSVFormat=DXGI_FORMAT_D32_FLOAT;
     p.DepthStencilState.DepthEnable=TRUE;p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;p.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS;p.DepthStencilState.StencilEnable=FALSE;
     if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthWrite)),"Create real depth-buffer PSO"))return false;
+    p.PS={aiHwDepthWrite->GetBufferPointer(),aiHwDepthWrite->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoAIHardwareDepthWrite)),"Create AI hardware depth write PSO"))return false;
     return true;
 }
 
@@ -208,6 +222,24 @@ bool D3D12Renderer::CreateVideoResources(){
     m_depth->SetName(L"DLSS_Depth_R32_TYPELESS_D32_DSV_R32_SRV");
     srv.Format=DXGI_FORMAT_R32_FLOAT;m_device->CreateShaderResourceView(m_depth.Get(),&srv,SRVCPU(3));
     D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};dsv.Format=DXGI_FORMAT_D32_FLOAT;dsv.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2D;m_device->CreateDepthStencilView(m_depth.Get(),&dsv,DSV());
+    // Step 04C synthetic hardware depth. It mirrors the real NGX depth resource shape
+    // and state contract, but m_dlss.Evaluate still receives m_depth in this step.
+    auto aiHwDep=Tex2D(DXGI_FORMAT_R32_TYPELESS,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&aiHwDep,D3D12_RESOURCE_STATE_DEPTH_WRITE,&dcv,IID_PPV_ARGS(&m_aiHardwareDepth)),"Create synthetic AI hardware depth"))return false;
+    m_aiHardwareDepth->SetName(L"AI_Synthetic_HW_Depth_DebugOnly_R32_TYPELESS_D32_DSV_R32_SRV");
+    srv.Format=DXGI_FORMAT_R32_FLOAT;m_device->CreateShaderResourceView(m_aiHardwareDepth.Get(),&srv,SRVCPU(8));
+    m_device->CreateDepthStencilView(m_aiHardwareDepth.Get(),&dsv,DSV(1));
+    LOG("[AI HWDepth] resource created: "<<m_renderW<<"x"<<m_renderH<<" R32_TYPELESS/D32_FLOAT/R32_FLOAT; mapping=1-relativeNearness; Step 04D A/B candidate when Depth Source=AI Synthetic.");
+    // Step 04D A/B baseline: independent constant conventional hardware depth.
+    // It deliberately does not modify the legacy guide/depth generator, so switching
+    // depth source changes only the resource supplied to NGX.
+    auto flatDep=Tex2D(DXGI_FORMAT_R32_TYPELESS,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+    D3D12_CLEAR_VALUE flatCv=dcv;flatCv.DepthStencil.Depth=0.75f;
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&flatDep,D3D12_RESOURCE_STATE_DEPTH_WRITE,&flatCv,IID_PPV_ARGS(&m_flatDepth)),"Create flat A/B depth"))return false;
+    m_flatDepth->SetName(L"DLSS_Flat_Depth_AB_R32_TYPELESS_D32_DSV_R32_SRV");
+    srv.Format=DXGI_FORMAT_R32_FLOAT;m_device->CreateShaderResourceView(m_flatDepth.Get(),&srv,SRVCPU(9));
+    m_device->CreateDepthStencilView(m_flatDepth.Get(),&dsv,DSV(2));
+    LOG("[NGX Depth] flat A/B resource created: "<<m_renderW<<"x"<<m_renderH<<" Z=0.75 conventional (0 near, 1 far).");
 
     auto bias=Tex2D(DXGI_FORMAT_R8_UNORM,m_renderW,m_renderH,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&bias,D3D12_RESOURCE_STATE_RENDER_TARGET,nullptr,IID_PPV_ARGS(&m_biasCurrent)),"Create BiasCurrentColor mask"))return false;
     m_biasCurrent->SetName(L"DLSS_BiasCurrentColor_Disocclusion_R8");srv.Format=DXGI_FORMAT_R8_UNORM;m_device->CreateShaderResourceView(m_biasCurrent.Get(),&srv,SRVCPU(5));m_device->CreateRenderTargetView(m_biasCurrent.Get(),nullptr,RTV(FrameCount+2));
@@ -219,6 +251,20 @@ bool D3D12Renderer::CreateVideoResources(){
         if(i==0){m_guideFootprint=fp;m_guideRows=rows;m_guideRowSize=rowBytes;m_guideUploadBytes=total;}
     }
     srv.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;m_device->CreateShaderResourceView(m_guideGrid.Get(),&srv,SRVCPU(6));
+
+    // Step 04A-2: a separate normalized AI-depth texture exists only for debug
+    // presentation. It is never passed to NGX and therefore cannot change NR behavior.
+    auto ai=Tex2D(DXGI_FORMAT_R32_FLOAT,AIDepthW,AIDepthH,D3D12_RESOURCE_FLAG_NONE);
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&ai,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_aiDepth)),"Create AI depth debug texture"))return false;
+    m_aiDepth->SetName(L"AI_Depth_DebugOnly_R32_FLOAT_518x518");
+    for(uint32_t i=0;i<FrameCount;++i){
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};uint32_t rows=0;uint64_t rowBytes=0,total=0;
+        if(!CreateUploadForTexture(ai,m_aiDepthUpload[i],m_aiDepthMapped[i],fp,rows,rowBytes,total,"Create AI depth upload"))return false;
+        if(i==0){m_aiDepthFootprint=fp;m_aiDepthRows=rows;m_aiDepthRowSize=rowBytes;m_aiDepthUploadBytes=total;}
+        if(m_aiDepthMapped[i])memset(m_aiDepthMapped[i],0,static_cast<size_t>(total));
+    }
+    srv.Format=DXGI_FORMAT_R32_FLOAT;m_device->CreateShaderResourceView(m_aiDepth.Get(),&srv,SRVCPU(7));
+
     auto out=Tex2D(DXGI_FORMAT_R16G16B16A16_FLOAT,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&out,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&m_dlssOutput)),"Create DLSS output"))return false;
     m_dlssOutput->SetName(L"DLSS_Output_Linear_FP16_UAV");
     srv.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;m_device->CreateShaderResourceView(m_dlssOutput.Get(),&srv,SRVCPU(1));
@@ -235,13 +281,16 @@ void D3D12Renderer::CopyMappedRows(uint8_t*mapped,const D3D12_PLACED_SUBRESOURCE
 
 float D3D12Renderer::Halton(uint32_t index,uint32_t base){float f=1.0f,r=0.0f;while(index){f/=float(base);r+=f*float(index%base);index/=base;}return r;}
 
-bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,float frameTimeMs){
+bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guideGridRGBA32F,size_t guideBytes,uint32_t gridW,uint32_t gridH,bool temporalReset,float frameTimeMs,const float*aiDepthPreview01,size_t aiDepthBytes,uint32_t aiDepthW,uint32_t aiDepthH){
     const size_t videoRow=size_t(m_sourceW)*4u,guideRow=size_t(m_gridW)*sizeof(float)*4u;
     if(!bgra||bytes<videoRow*m_sourceH||!guideGridRGBA32F||gridW!=m_gridW||gridH!=m_gridH||guideBytes<guideRow*m_gridH)return false;
+    const bool haveAIDepth=aiDepthPreview01&&aiDepthW==AIDepthW&&aiDepthH==AIDepthH&&aiDepthBytes>=size_t(AIDepthW)*AIDepthH*sizeof(float);
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot)) return false;
     CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
     CopyMappedRows(m_guideMapped[slot],m_guideFootprint,guideGridRGBA32F,guideRow,m_gridH);
+    if(haveAIDepth)CopyMappedRows(m_aiDepthMapped[slot],m_aiDepthFootprint,aiDepthPreview01,size_t(AIDepthW)*sizeof(float),AIDepthH);
+    else if(m_aiDepthClearPending)memset(m_aiDepthMapped[slot],0,static_cast<size_t>(m_aiDepthUploadBytes));
     if(!HR(m_allocators[slot]->Reset(),"Reset frame allocator")) return false;
     auto* cmd=m_cmds[slot].Get();
     if(!HR(cmd->Reset(m_allocators[slot].Get(),nullptr),"Reset frame command list")) return false;
@@ -254,12 +303,24 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     d.pResource=m_guideGrid.Get();s.pResource=m_guideUpload[slot].Get();s.PlacedFootprint=m_guideFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
     Barrier(cmd,m_guideGrid.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_gridInCopyDest=false;
 
+    // Upload only a newly completed AI result (or a requested clear). The texture is
+    // separate from m_depth, which remains the exact resource supplied to NGX.
+    if(haveAIDepth||m_aiDepthClearPending||m_aiDepthInCopyDest){
+        if(!m_aiDepthInCopyDest)Barrier(cmd,m_aiDepth.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        d.pResource=m_aiDepth.Get();s.pResource=m_aiDepthUpload[slot].Get();s.PlacedFootprint=m_aiDepthFootprint;cmd->CopyTextureRegion(&d,0,0,0,&s,nullptr);
+        Barrier(cmd,m_aiDepth.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_aiDepthInCopyDest=false;
+        m_aiDepthValid=haveAIDepth;m_aiDepthClearPending=false;
+    }
+
     // One temporal jitter sample drives BOTH the color reconstruction input and the
     // spatial lookup of all guide buffers.  The motion-vector VALUES themselves remain
     // unjittered (hence no MVJittered create flag), matching the standard DLSS contract.
-    const float jitterX=Halton(uint32_t(m_framesPresented%1024)+1,2)-0.5f;
-    const float jitterY=Halton(uint32_t(m_framesPresented%1024)+1,3)-0.5f;
-    const float jitterUVX=jitterX/float(m_renderW), jitterUVY=jitterY/float(m_renderH);
+    // Encoded video is already a raster sample; do not synthesize camera jitter by
+    // shifting that finished image. We have no hidden sub-pixel raster samples to
+    // reveal, and alternating offsets can visibly shake the player/NR output.
+    // NGX receives zero jitter because the color/depth/guide inputs are unjittered.
+    const float jitterX=0.0f,jitterY=0.0f;
+    const float jitterUVX=0.0f,jitterUVY=0.0f;
 
     // GPU-expand the compact CPU optical-flow/mask analysis to exact DLSS input
     // resolution. Depth is deliberately NOT mirrored through a color RT anymore:
@@ -277,6 +338,23 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     auto dsvh=DSV();cmd->OMSetRenderTargets(0,nullptr,FALSE,&dsvh);cmd->ClearDepthStencilView(dsvh,D3D12_CLEAR_FLAG_DEPTH,1.0f,0,0,nullptr);
     cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoDepthWrite.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(6));cmd->SetGraphicsRoot32BitConstants(1,4,guideParams,0);cmd->DrawInstanced(3,1,0,0);
     Barrier(cmd,m_depth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,DepthGuideReadState);m_depthInWrite=false;
+    // Step 04C: expand stabilized relative AI depth to a true full-resolution D32
+    // hardware-depth resource. AI relative nearness is white=near; conventional D3D
+    // hardware depth is the inverse polarity: 0=near, 1=far. This resource is NOT NGX input yet.
+    if(m_aiDepthValid||m_aiHardwareDepthClearPending||m_aiHardwareDepthInWrite){
+        if(!m_aiHardwareDepthInWrite)Barrier(cmd,m_aiHardwareDepth.Get(),DepthGuideReadState,D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        auto aiDsvh=DSV(1);cmd->OMSetRenderTargets(0,nullptr,FALSE,&aiDsvh);cmd->ClearDepthStencilView(aiDsvh,D3D12_CLEAR_FLAG_DEPTH,1.0f,0,0,nullptr);
+        if(m_aiDepthValid){
+            cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoAIHardwareDepthWrite.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(7));cmd->DrawInstanced(3,1,0,0);
+        }
+        Barrier(cmd,m_aiHardwareDepth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,DepthGuideReadState);m_aiHardwareDepthInWrite=false;
+        m_aiHardwareDepthValid=m_aiDepthValid;m_aiHardwareDepthClearPending=false;
+    }
+    // Step 04D: initialize the independent flat depth baseline once.
+    if(m_flatDepthInWrite){
+        auto flatDsv=DSV(2);cmd->OMSetRenderTargets(0,nullptr,FALSE,&flatDsv);cmd->ClearDepthStencilView(flatDsv,D3D12_CLEAR_FLAG_DEPTH,0.75f,0,0,nullptr);
+        Barrier(cmd,m_flatDepth.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,DepthGuideReadState);m_flatDepthInWrite=false;
+    }
 
     if(!m_colorInRT)Barrier(cmd,m_dlssColor.Get(),GuideReadState,D3D12_RESOURCE_STATE_RENDER_TARGET);m_colorInRT=true;
     D3D12_VIEWPORT vp{0,0,float(m_renderW),float(m_renderH),0,1};D3D12_RECT sc{0,0,LONG(m_renderW),LONG(m_renderH)};cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);
@@ -317,7 +395,24 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
 
     bool used=false;if(DLSSEnabled() && m_dlss.FeatureCreated()){
         if(!m_outputInUAV)Barrier(cmd,m_dlssOutput.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);m_outputInUAV=true;
-        used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),m_depth.Get(),m_motion.Get(),m_biasCurrent.Get(),temporalReset,frameTimeMs,jitterX,jitterY);
+        // Step 04D NGX depth-source A/B. AI Synthetic intentionally falls back to
+        // Legacy until the full-resolution AI hardware-depth resource is valid. Any
+        // effective source transition resets DLSS temporal history on that exact frame.
+        DepthSource effectiveDepth=m_depthSource;
+        ID3D12Resource* ngxDepth=m_depth.Get();
+        if(m_depthSource==DepthSource::Flat){ngxDepth=m_flatDepth.Get();}
+        else if(m_depthSource==DepthSource::AISynthetic){
+            if(m_aiHardwareDepthValid)ngxDepth=m_aiHardwareDepth.Get();
+            else effectiveDepth=DepthSource::Legacy;
+        }
+        const bool depthSourceChanged=effectiveDepth!=m_effectiveDepthSource;
+        if(depthSourceChanged){
+            auto name=[](DepthSource s){switch(s){case DepthSource::Flat:return "FLAT";case DepthSource::AISynthetic:return "AI_SYNTHETIC";default:return "LEGACY";}};
+            LOG("[NGX Depth] effective="<<name(effectiveDepth)<<" requested="<<name(m_depthSource)<<" aiValid="<<(m_aiHardwareDepthValid?1:0)<<" temporalReset=1");
+        }
+        const bool ngxTemporalReset=temporalReset||depthSourceChanged;
+        used=m_dlss.Evaluate(cmd,m_dlssColor.Get(),m_dlssOutput.Get(),ngxDepth,m_motion.Get(),m_biasCurrent.Get(),ngxTemporalReset,frameTimeMs,jitterX,jitterY);
+        m_effectiveDepthSource=effectiveDepth;
         if(used){Barrier(cmd,m_dlssOutput.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_outputInUAV=false;}
     }
 
@@ -335,6 +430,8 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
         case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(2));break;
         case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(3));break;
         case DebugView::BiasMask:debugPixelResource=m_biasCurrent.Get();cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(5));break;
+        case DebugView::AIDepth:cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(7));break;
+        case DebugView::AIHardwareDepth:debugPixelResource=m_aiHardwareDepth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoAIHardwareDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(8));break;
         case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(4));break;
         default:cmd->SetPipelineState(m_psoPresent.Get());if(used)cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(1));else{debugPixelResource=m_dlssColor.Get();cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(4));}break;
     }
@@ -380,6 +477,8 @@ bool D3D12Renderer::PresentCurrent(){
         case DebugView::MotionVectors:debugPixelResource=m_motion.Get();cmd->SetPipelineState(m_psoMotionDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(2));break;
         case DebugView::Depth:debugPixelResource=m_depth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(3));break;
         case DebugView::BiasMask:debugPixelResource=m_biasCurrent.Get();cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(5));break;
+        case DebugView::AIDepth:cmd->SetPipelineState(m_psoDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(7));break;
+        case DebugView::AIHardwareDepth:debugPixelResource=m_aiHardwareDepth.Get();debugBefore=DepthGuideReadState;cmd->SetPipelineState(m_psoAIHardwareDepthDebug.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(8));break;
         case DebugView::Input:debugPixelResource=m_dlssColor.Get();cmd->SetPipelineState(m_psoPresent.Get());cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(4));break;
         default:
             cmd->SetPipelineState(m_psoPresent.Get());
@@ -420,6 +519,6 @@ void D3D12Renderer::WaitGPU(){
     if(m_fence->GetCompletedValue()<v){m_fence->SetEventOnCompletion(v,m_fenceEvent);WaitForSingleObject(m_fenceEvent,INFINITE);}
 }
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::RTV(uint32_t i)const{auto h=m_rtvHeap->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(i)*m_rtvInc;return h;}
-D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::DSV()const{return m_dsvHeap->GetCPUDescriptorHandleForHeapStart();}
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::DSV(uint32_t index)const{auto h=m_dsvHeap->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(index)*m_dsvInc;return h;}
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::SRVCPU(uint32_t i)const{auto h=m_srvHeap->GetCPUDescriptorHandleForHeapStart();h.ptr+=SIZE_T(i)*m_srvInc;return h;}
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::SRVGPU(uint32_t i)const{auto h=m_srvHeap->GetGPUDescriptorHandleForHeapStart();h.ptr+=UINT64(i)*m_srvInc;return h;}

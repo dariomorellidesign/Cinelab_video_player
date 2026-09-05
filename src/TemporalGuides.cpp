@@ -1,13 +1,17 @@
 #include "TemporalGuides.h"
+#include "MaskDepthGuide.h"
+#include "SceneCutDetector.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 
 void TemporalGuideGenerator::Reset() {
     m_prevLuma.clear();
     m_prevDepth.clear();
+    m_softMask.Reset();
     m_gridW = m_gridH = 0;
     m_havePrev = false;
 }
@@ -243,7 +247,8 @@ void TemporalGuideGenerator::BuildDepthProxy(const std::vector<float>& luma,
 
 bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uint32_t sourceH,
                                        uint32_t renderW, uint32_t renderH, double targetFps, bool reset,
-                                       GuideFrame& out, const ExternalMotionField* externalMotion) {
+                                       GuideFrame& out, const ExternalMotionField* externalMotion,
+                                       const ExternalDepthField* externalMaskDepth) {
     if (!bgra || !sourceW || !sourceH || !renderW || !renderH) return false;
     if (reset) Reset();
 
@@ -258,47 +263,148 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
 
     std::vector<float> fx(size_t(gw) * gh, 0.0f), fy(size_t(gw) * gh, 0.0f), mismatch(size_t(gw) * gh, 1.0f);
     float globalX = 0.0f, globalY = 0.0f;
+    const bool externalCandidate = externalMotion && externalMotion->valid &&
+        externalMotion->motionXY && externalMotion->gridW && externalMotion->gridH &&
+        externalMotion->sourceW == sourceW && externalMotion->sourceH == sourceH;
+    out.usedHardwareFastPath = false;
+    out.legacyFlowEvaluated = false;
     bool history = m_havePrev && m_prevLuma.size() == cur.size();
     float globalCost = 0.0f;
+    bool hardCut = false;
     if (history) {
-        EstimateFlow(cur, m_prevLuma, gw, gh, fx, fy, mismatch, globalX, globalY, globalCost);
-        // Retain the baseline scene-cut rule for this checkpoint.  NVOF replaces
-        // motion only; depth/mask/cut behaviour remains intentionally comparable.
-        if (globalCost > 0.10f) {
-            history = false;
-            std::fill(fx.begin(), fx.end(), 0.0f);
-            std::fill(fy.begin(), fy.end(), 0.0f);
-            std::fill(mismatch.begin(), mismatch.end(), 1.0f);
-            globalX = globalY = 0.0f;
-            m_prevDepth.clear();
+        if (externalCandidate) {
+            // Step 04B-4 hardware-flow fast path. NVOFA is already the authoritative
+            // current->previous motion source, so do not spend CPU time solving a second
+            // block-matching flow field that will be discarded. Resample NVOFA only onto
+            // the tiny legacy analysis grid used by the depth/mask fallback.
+            out.usedHardwareFastPath = true;
+            const float sourceToLegacyX = float(gw) / float(sourceW);
+            const float sourceToLegacyY = float(gh) / float(sourceH);
+            auto sampleExternalLegacy = [&](float sx, float sy, float& mx, float& my) {
+                sx = std::clamp(sx, 0.0f, float(externalMotion->gridW - 1));
+                sy = std::clamp(sy, 0.0f, float(externalMotion->gridH - 1));
+                const uint32_t x0 = uint32_t(std::floor(sx));
+                const uint32_t y0 = uint32_t(std::floor(sy));
+                const uint32_t x1 = std::min(externalMotion->gridW - 1, x0 + 1);
+                const uint32_t y1 = std::min(externalMotion->gridH - 1, y0 + 1);
+                const float tx = sx - float(x0), ty = sy - float(y0);
+                auto c = [&](uint32_t x, uint32_t y, uint32_t component) {
+                    return externalMotion->motionXY[(size_t(y) * externalMotion->gridW + x) * 2u + component];
+                };
+                const float ax = c(x0,y0,0), bx = c(x1,y0,0), cx = c(x0,y1,0), dx = c(x1,y1,0);
+                const float ay = c(x0,y0,1), by = c(x1,y0,1), cy = c(x0,y1,1), dy = c(x1,y1,1);
+                mx = (ax + (bx - ax) * tx) + ((cx + (dx - cx) * tx) - (ax + (bx - ax) * tx)) * ty;
+                my = (ay + (by - ay) * tx) + ((cy + (dy - cy) * tx) - (ay + (by - ay) * tx)) * ty;
+            };
+
+            double sumX = 0.0, sumY = 0.0, sumCost = 0.0;
+            uint64_t validSamples = 0;
+            for (uint32_t y = 0; y < gh; ++y) {
+                for (uint32_t x = 0; x < gw; ++x) {
+                    const size_t i = size_t(y) * gw + x;
+                    const float ofX = (float(x) + 0.5f) * float(externalMotion->gridW) / float(gw) - 0.5f;
+                    const float ofY = (float(y) + 0.5f) * float(externalMotion->gridH) / float(gh) - 0.5f;
+                    float mx = 0.0f, my = 0.0f;
+                    sampleExternalLegacy(ofX, ofY, mx, my);
+                    const float gxv = mx * sourceToLegacyX;
+                    const float gyv = my * sourceToLegacyY;
+                    fx[i] = gxv;
+                    fy[i] = gyv;
+                    const float previous = SampleBilinear(m_prevLuma, float(x) + gxv, float(y) + gyv, int(gw), int(gh));
+                    const float residual = std::isfinite(previous) ? std::abs(cur[i] - previous) : 1.0f;
+                    mismatch[i] = std::clamp(residual, 0.0f, 1.0f);
+                    if (std::isfinite(previous)) {
+                        sumX += gxv; sumY += gyv; sumCost += residual; ++validSamples;
+                    }
+                }
+            }
+            if (validSamples) {
+                globalX = float(sumX / double(validSamples));
+                globalY = float(sumY / double(validSamples));
+                globalCost = float(sumCost / double(validSamples));
+            } else {
+                globalX = globalY = 0.0f;
+                globalCost = 1.0f;
+            }
+            // No legacy scene-cut gate is applied here. Step 04A-3 established that a
+            // valid hardware flow pair must not be invalidated by the old CPU heuristic.
         } else {
-            MedianFlow(fx, fy, gw, gh);
+            // Fallback is intentionally unchanged for systems/frames without NVOFA.
+            out.legacyFlowEvaluated = true;
+            EstimateFlow(cur, m_prevLuma, gw, gh, fx, fy, mismatch, globalX, globalY, globalCost);
+            hardCut = globalCost > 0.10f;
+            if (hardCut) {
+                history = false;
+                std::fill(fx.begin(), fx.end(), 0.0f);
+                std::fill(fy.begin(), fy.end(), 0.0f);
+                std::fill(mismatch.begin(), mismatch.end(), 1.0f);
+                globalX = globalY = 0.0f;
+                m_prevDepth.clear();
+    m_softMask.Reset();
+            } else {
+                MedianFlow(fx, fy, gw, gh);
+            }
         }
     }
-
+    // Step 04E-2 hard scene-cut mask reset. NVOFA remains authoritative for normal
+    // motion, but a real cut has no meaningful current->previous correspondence. Use
+    // the already motion-compensated residual distribution plus direct frame change to
+    // distinguish a hard cut from grain, local motion, or a tracked camera pan.
+    const char* sceneCutPolicy = std::getenv("DMP_SCENE_CUT_RESET");
+    const bool sceneCutResetEnabled = !(sceneCutPolicy &&
+        (std::strcmp(sceneCutPolicy,"off")==0 || std::strcmp(sceneCutPolicy,"OFF")==0 ||
+         std::strcmp(sceneCutPolicy,"0")==0 || std::strcmp(sceneCutPolicy,"false")==0));
+    if (history && !hardCut && sceneCutResetEnabled) {
+        const SceneCutMetrics cut = DetectHardSceneCut(cur, m_prevLuma, mismatch);
+        out.sceneCutResidualMean = cut.warpedResidualMean;
+        out.sceneCutResidualMedian = cut.warpedResidualMedian;
+        out.sceneCutStrongFraction = cut.warpedStrongFraction;
+        out.sceneCutDirectStrongFraction = cut.directStrongFraction;
+        if (cut.hardCut) {
+            hardCut = true;
+            history = false;
+            out.sceneCutDetected = true;
+            std::fill(fx.begin(), fx.end(), 0.0f);
+            std::fill(fy.begin(), fy.end(), 0.0f);
+            std::fill(mismatch.begin(), mismatch.end(), 0.0f);
+            globalX = globalY = 0.0f;
+            m_prevDepth.clear();
+            // Critical fix: do not let the slow-release mask from the previous shot
+            // leak into the new shot. The cut frame itself is rendered with zero mask
+            // and !hasHistory forces a DLSS/NR temporal reset.
+            m_softMask.Reset();
+        }
+    }
+    if (hardCut) out.sceneCutDetected = true;
     std::vector<float> depthGrid;
     BuildDepthProxy(cur, fx, fy, gw, gh, depthGrid);
 
     // Build the OLD mask at the OLD analysis resolution. In Step 02A we only
     // replace the motion source, then upsample this baseline mask/depth to the
     // higher output guide grid so the comparison remains controlled.
-    std::vector<float> maskGrid(size_t(gw) * gh, 0.0f);
-    if (history) {
-        for (uint32_t y = 0; y < gh; ++y) {
-            for (uint32_t x = 0; x < gw; ++x) {
-                const size_t i = size_t(y) * gw + x;
-                const uint32_t xl = x ? x - 1 : x;
-                const uint32_t xr = std::min(gw - 1, x + 1);
-                const uint32_t yt = y ? y - 1 : y;
-                const uint32_t yb = std::min(gh - 1, y + 1);
-                const float dx = fx[size_t(y) * gw + xr] - fx[size_t(y) * gw + xl];
-                const float dy = fy[size_t(yb) * gw + x] - fy[size_t(yt) * gw + x];
-                if (mismatch[i] > 0.115f || std::abs(dx) + std::abs(dy) > 2.5f)
-                    maskGrid[i] = 1.0f;
-            }
+    // Step 04E-1 AI depth-guided temporal mask. Guide B remains the legacy depth proxy;
+    // only the internal structural depth signal used by the SOFT MASK is replaced by
+    // stabilized AI relative depth when a sufficiently fresh asynchronous frame exists.
+    // The mask uses |depth differences|, so near/far polarity does not matter here.
+    std::vector<float> maskDepthGuide = depthGrid;
+    out.maskAIDepthAvailable = externalMaskDepth && externalMaskDepth->depth01 &&
+        externalMaskDepth->width && externalMaskDepth->height;
+    out.maskDepthAgeMs = out.maskAIDepthAvailable ? externalMaskDepth->ageMs : -1.0f;
+    out.maskDepthAgeFrames = out.maskAIDepthAvailable ? externalMaskDepth->ageFrames : -1.0f;
+    const char* maskDepthPolicy = std::getenv("DMP_MASK_DEPTH");
+    const bool forceLegacyMaskDepth = maskDepthPolicy &&
+        (std::strcmp(maskDepthPolicy,"legacy")==0 || std::strcmp(maskDepthPolicy,"LEGACY")==0 ||
+         std::strcmp(maskDepthPolicy,"proxy")==0 || std::strcmp(maskDepthPolicy,"0")==0);
+    if (!forceLegacyMaskDepth && out.maskAIDepthAvailable && externalMaskDepth->valid) {
+        std::vector<float> aiDepthOnAnalysisGrid;
+        if (ResampleMaskDepthGuide01(externalMaskDepth->depth01, externalMaskDepth->width,
+                                     externalMaskDepth->height, gw, gh, aiDepthOnAnalysisGrid)) {
+            maskDepthGuide = std::move(aiDepthOnAnalysisGrid);
+            out.maskUsedAIDepth = true;
         }
     }
-
+    std::vector<float> maskGrid;
+    m_softMask.Build(cur, fx, fy, mismatch, maskDepthGuide, gw, gh, history, maskGrid);
     const uint32_t outGW = m_outputGridW ? m_outputGridW : gw;
     const uint32_t outGH = m_outputGridH ? m_outputGridH : gh;
     if (!outGW || !outGH) return false;
@@ -321,9 +427,8 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
         return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty;
     };
 
-    const bool useExternal = history && externalMotion && externalMotion->valid &&
-        externalMotion->motionXY && externalMotion->gridW && externalMotion->gridH &&
-        externalMotion->sourceW == sourceW && externalMotion->sourceH == sourceH;
+    const bool useExternal = history && externalCandidate;
+
 
     auto sampleExternalMotion = [&](float sx, float sy, float& mx, float& my) {
         sx = std::clamp(sx, 0.0f, float(externalMotion->gridW - 1));
@@ -356,37 +461,85 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     const float sourceToRenderX = float(renderW) / float(sourceW);
     const float sourceToRenderY = float(renderH) / float(sourceH);
 
-    for (uint32_t y = 0; y < outGH; ++y) {
+    // Common NVOFA path: SetOutputGrid() is the hardware OF grid itself. Avoid doing
+    // a bilinear NVOFA sample for every guide cell when the coordinates are identical.
+    // Depth/mask preserve the previous bilinear result, but their X/Y indices and
+    // interpolation weights are precomputed once per row/column instead of recomputed
+    // for every scalar sample. Motion values remain bit-for-bit source samples apart
+    // from the existing source->DLSS-input scale.
+    const bool directExternalGrid = useExternal && outGW == externalMotion->gridW && outGH == externalMotion->gridH;
+    if (directExternalGrid) {
+        struct AxisLerp { uint32_t i0=0, i1=0; float t=0.0f; };
+        std::vector<AxisLerp> xMap(outGW), yMap(outGH);
         for (uint32_t x = 0; x < outGW; ++x) {
-            const float oldX = (float(x) + 0.5f) * float(gw) / float(outGW) - 0.5f;
-            const float oldY = (float(y) + 0.5f) * float(gh) / float(outGH) - 0.5f;
-            const size_t o = (size_t(y) * outGW + x) * 4u;
-
-            float motionX = 0.0f, motionY = 0.0f;
-            if (history) {
-                if (useExternal) {
-                    const float ofX = (float(x) + 0.5f) * float(externalMotion->gridW) / float(outGW) - 0.5f;
-                    const float ofY = (float(y) + 0.5f) * float(externalMotion->gridH) / float(outGH) - 0.5f;
-                    sampleExternalMotion(ofX, ofY, motionX, motionY);
-                    motionX *= sourceToRenderX;
-                    motionY *= sourceToRenderY;
-                } else {
-                    motionX = sampleScalar(fx, gw, gh, oldX, oldY) * legacyToRenderX;
-                    motionY = sampleScalar(fy, gw, gh, oldX, oldY) * legacyToRenderY;
-                }
+            float s = (float(x) + 0.5f) * float(gw) / float(outGW) - 0.5f;
+            s = std::clamp(s, 0.0f, float(gw - 1));
+            const uint32_t i0 = uint32_t(std::floor(s));
+            xMap[x] = AxisLerp{i0, std::min(gw - 1, i0 + 1), s - float(i0)};
+        }
+        for (uint32_t y = 0; y < outGH; ++y) {
+            float s = (float(y) + 0.5f) * float(gh) / float(outGH) - 0.5f;
+            s = std::clamp(s, 0.0f, float(gh - 1));
+            const uint32_t i0 = uint32_t(std::floor(s));
+            yMap[y] = AxisLerp{i0, std::min(gh - 1, i0 + 1), s - float(i0)};
+        }
+        auto mappedScalar = [&](const std::vector<float>& field, const AxisLerp& ax, const AxisLerp& ay) -> float {
+            if (field.empty()) return 0.0f;
+            const float a = field[size_t(ay.i0) * gw + ax.i0];
+            const float b = field[size_t(ay.i0) * gw + ax.i1];
+            const float c = field[size_t(ay.i1) * gw + ax.i0];
+            const float d = field[size_t(ay.i1) * gw + ax.i1];
+            const float top = a + (b - a) * ax.t;
+            const float bottom = c + (d - c) * ax.t;
+            return top + (bottom - top) * ay.t;
+        };
+        for (uint32_t y = 0; y < outGH; ++y) {
+            const AxisLerp ay = yMap[y];
+            for (uint32_t x = 0; x < outGW; ++x) {
+                const size_t cell = size_t(y) * outGW + x;
+                const size_t o = cell * 4u;
+                const size_t m = cell * 2u;
+                out.guideGridRGBA32F[o + 0] = externalMotion->motionXY[m + 0] * sourceToRenderX;
+                out.guideGridRGBA32F[o + 1] = externalMotion->motionXY[m + 1] * sourceToRenderY;
+                out.guideGridRGBA32F[o + 2] = mappedScalar(depthGrid, xMap[x], ay);
+                out.guideGridRGBA32F[o + 3] = history ? mappedScalar(maskGrid, xMap[x], ay) : 0.0f;
             }
+        }
+    } else {
+        // Generic/fallback path retains the existing bilinear behavior.
+        for (uint32_t y = 0; y < outGH; ++y) {
+            for (uint32_t x = 0; x < outGW; ++x) {
+                const float oldX = (float(x) + 0.5f) * float(gw) / float(outGW) - 0.5f;
+                const float oldY = (float(y) + 0.5f) * float(gh) / float(outGH) - 0.5f;
+                const size_t o = (size_t(y) * outGW + x) * 4u;
 
-            out.guideGridRGBA32F[o + 0] = motionX;
-            out.guideGridRGBA32F[o + 1] = motionY;
-            out.guideGridRGBA32F[o + 2] = sampleScalar(depthGrid, gw, gh, oldX, oldY);
-            out.guideGridRGBA32F[o + 3] = history ? sampleScalar(maskGrid, gw, gh, oldX, oldY) : 0.0f;
+                float motionX = 0.0f, motionY = 0.0f;
+                if (history) {
+                    if (useExternal) {
+                        const float ofX = (float(x) + 0.5f) * float(externalMotion->gridW) / float(outGW) - 0.5f;
+                        const float ofY = (float(y) + 0.5f) * float(externalMotion->gridH) / float(outGH) - 0.5f;
+                        sampleExternalMotion(ofX, ofY, motionX, motionY);
+                        motionX *= sourceToRenderX;
+                        motionY *= sourceToRenderY;
+                    } else {
+                        motionX = sampleScalar(fx, gw, gh, oldX, oldY) * legacyToRenderX;
+                        motionY = sampleScalar(fy, gw, gh, oldX, oldY) * legacyToRenderY;
+                    }
+                }
+
+                out.guideGridRGBA32F[o + 0] = motionX;
+                out.guideGridRGBA32F[o + 1] = motionY;
+                out.guideGridRGBA32F[o + 2] = sampleScalar(depthGrid, gw, gh, oldX, oldY);
+                out.guideGridRGBA32F[o + 3] = history ? sampleScalar(maskGrid, gw, gh, oldX, oldY) : 0.0f;
+            }
         }
     }
-
     out.hasHistory = history;
     out.globalMotionX = globalX * legacyToRenderX;
     out.globalMotionY = globalY * legacyToRenderY;
     out.globalMatchCost = globalCost;
+    out.usedExternalMotion = useExternal;
+    out.hardCut = hardCut;
     m_prevLuma = std::move(cur);
     m_havePrev = true;
     return true;

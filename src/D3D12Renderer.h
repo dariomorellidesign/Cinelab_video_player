@@ -8,7 +8,12 @@
 
 class D3D12Renderer {
 public:
-    enum class DebugView { Final, Input, MotionVectors, Depth, BiasMask };
+    enum class DebugView { Final, Input, MotionVectors, Depth, BiasMask, AIDepth, AIHardwareDepth };
+    enum class DepthSource { Legacy, Flat, AISynthetic };
+
+    void SetDepthSource(DepthSource source) { m_depthSource = source; }
+    DepthSource GetDepthSource() const { return m_depthSource; }
+    DepthSource GetEffectiveDepthSource() const { return m_effectiveDepthSource; }
 
     struct ColorSettings {
         float brightness = 0.0f;   // exposure-like brightness, in stops (-2..+2)
@@ -27,7 +32,9 @@ public:
     bool RenderFrame(const uint8_t* bgra, size_t bytes,
                      const float* guideGridRGBA32F, size_t guideBytes,
                      uint32_t gridW, uint32_t gridH,
-                     bool temporalReset, float frameTimeMs);
+                     bool temporalReset, float frameTimeMs,
+                     const float* aiDepthPreview01, size_t aiDepthBytes,
+                     uint32_t aiDepthW, uint32_t aiDepthH);
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
@@ -39,6 +46,7 @@ public:
     ID3D12Device* Device() const { return m_device.Get(); }
     void SetDebugView(DebugView v) { m_debugView = v; }
     DebugView GetDebugView() const { return m_debugView; }
+    void ResetAIDepthDebug() { m_aiDepthClearPending = true; m_aiDepthValid = false; m_aiHardwareDepthClearPending = true; m_aiHardwareDepthValid = false; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
     uint64_t FramesPresented() const { return m_framesPresented; }
     bool DLSSFeatureCreated() const { return m_dlss.FeatureCreated(); }
@@ -52,6 +60,8 @@ public:
 
 private:
     static constexpr uint32_t FrameCount = 3;
+    static constexpr uint32_t AIDepthW = 518;
+    static constexpr uint32_t AIDepthH = 518;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
     // at EvaluateFeature time. Debug/presentation passes temporarily transition selected
     // resources to PIXEL_SHADER_RESOURCE and restore them before the frame ends.
@@ -79,7 +89,7 @@ private:
     void Barrier(ID3D12GraphicsCommandList* cmd, ID3D12Resource* res,
                  D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after);
     D3D12_CPU_DESCRIPTOR_HANDLE RTV(uint32_t index) const;
-    D3D12_CPU_DESCRIPTOR_HANDLE DSV() const;
+    D3D12_CPU_DESCRIPTOR_HANDLE DSV(uint32_t index=0) const;
     D3D12_CPU_DESCRIPTOR_HANDLE SRVCPU(uint32_t index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE SRVGPU(uint32_t index) const;
     static float Halton(uint32_t index, uint32_t base);
@@ -112,7 +122,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresent;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoMotionDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthDebug;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoAIHardwareDepthDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthWrite;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoAIHardwareDepthWrite;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoExpandGuides;
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_decodedTexture;
@@ -124,16 +136,34 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_dlssOutput;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideGrid;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideUpload[FrameCount];
+    // Debug-only AI relative-depth texture. It remains separate from the NGX depth input.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_aiDepth;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_aiDepthUpload[FrameCount];
+    // Step 04C: full DLSS-input-resolution synthetic hardware Z. Same typeless/D32/R32
+    // resource pattern as NGX depth. Step 04D may select it as the live NGX depth input.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_aiHardwareDepth;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_flatDepth;
 
     uint8_t* m_uploadMapped[FrameCount]{};
     uint8_t* m_guideMapped[FrameCount]{};
+    uint8_t* m_aiDepthMapped[FrameCount]{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
-    uint32_t m_numRows=0,m_guideRows=0;
-    uint64_t m_rowSize=0,m_uploadBytes=0,m_guideRowSize=0,m_guideUploadBytes=0;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_aiDepthFootprint{};
+    uint32_t m_numRows=0,m_guideRows=0,m_aiDepthRows=0;
+    uint64_t m_rowSize=0,m_uploadBytes=0,m_guideRowSize=0,m_guideUploadBytes=0,m_aiDepthRowSize=0,m_aiDepthUploadBytes=0;
 
     bool m_sourceInCopyDest = true;
     bool m_gridInCopyDest = true;
+    bool m_aiDepthInCopyDest = true;
+    bool m_aiDepthClearPending = true;
+    bool m_aiDepthValid = false;
+    bool m_aiHardwareDepthInWrite = true;
+    bool m_aiHardwareDepthClearPending = true;
+    bool m_aiHardwareDepthValid = false;
+    bool m_flatDepthInWrite = true;
+    DepthSource m_depthSource = DepthSource::Legacy;
+    DepthSource m_effectiveDepthSource = DepthSource::Legacy;
     bool m_colorInRT = true;
     bool m_guidesInRT = true;
     bool m_depthInWrite = true;
