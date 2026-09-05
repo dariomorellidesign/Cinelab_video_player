@@ -47,6 +47,8 @@ public:
     void SetDebugView(DebugView v) { m_debugView = v; }
     DebugView GetDebugView() const { return m_debugView; }
     void SetSplitScreen(bool enabled) { m_splitScreen = enabled; }
+    void SetSplitFraction(float fraction) { m_splitFraction = fraction; }
+    float SplitFraction() const { return m_splitFraction; }
     bool SplitScreenEnabled() const { return m_splitScreen; }
     void ResetAIDepthDebug() { m_aiDepthClearPending = true; m_aiDepthValid = false; m_aiHardwareDepthClearPending = true; m_aiHardwareDepthValid = false; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
@@ -180,5 +182,6 @@ private:
     ColorSettings m_colorSettings{};
     bool m_lastDLSSUsed = false;
     bool m_splitScreen = false;
+    float m_splitFraction = 0.5f;
     DLSSBackend m_dlss;
 };

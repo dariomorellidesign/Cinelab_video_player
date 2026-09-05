@@ -457,7 +457,7 @@ void D3D12Renderer::DrawSplitComparison(ID3D12GraphicsCommandList* cmd,bool dlss
     // Step 04F: keep the FULL output viewport for both draws and clip only with
     // scissors. This preserves exact spatial correspondence: left x is the same
     // source/output coordinate as right x; neither half is horizontally squeezed.
-    const auto layout=ComputeSplitScreenLayout(m_outputW,0.5f);
+    const auto layout=ComputeSplitScreenLayout(m_outputW,m_splitFraction);
     const LONG splitX=LONG(layout.splitX);
     D3D12_RECT left{0,0,splitX,LONG(m_outputH)};
     D3D12_RECT right{splitX,0,LONG(m_outputW),LONG(m_outputH)};
