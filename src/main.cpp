@@ -56,6 +56,15 @@ enum : UINT {
 
 static constexpr UINT IDM_SPLIT_SCREEN = 380;
 static constexpr UINT IDM_SPLIT_RESET = 381;
+static constexpr UINT IDM_VSYNC = 382;
+static constexpr UINT IDM_FRAMEGEN_OFF = 383;
+static constexpr UINT IDM_FRAMEGEN_2X = 384;
+static constexpr UINT IDM_FRAMEGEN_3X = 385;
+static constexpr UINT IDM_FRAMEGEN_4X = 386;
+static constexpr UINT IDM_FRAMEGEN_5X = 387;
+static constexpr UINT IDM_FRAMEGEN_6X = 388;
+static constexpr UINT IDM_TEMPORAL_MASK_BYPASS = 389; // STEP 05C-1 temporal-mask bypass + VSync FG safety
+// STEP 05C FG UX + telemetry
 static constexpr UINT IDM_AUDIO_TRACK_BASE = 600;
 static constexpr UINT IDM_SUBTITLE_OFF = 700;
 static constexpr UINT IDM_SUBTITLE_TRACK_BASE = 710;
@@ -71,6 +80,8 @@ static constexpr int HK_SPLIT_SCREEN = 9008;
 static constexpr int HK_SPLIT_RESET = 9009;
 static constexpr int HK_SPLIT_LEFT = 9010;
 static constexpr int HK_SPLIT_RIGHT = 9011;
+static constexpr int HK_VSYNC = 9012;
+static constexpr int HK_FRAMEGEN = 9013;
 
 static constexpr int IDC_ADJ_BRIGHTNESS = 7101;
 static constexpr int IDC_ADJ_CONTRAST = 7102;
@@ -183,6 +194,12 @@ class PlayerApp {
     int m_selectedSubtitleStream=-1;
     std::wstring m_subtitleText;
     bool m_subtitleClockAnnounced=false;
+    bool m_vsyncEnabled=true;
+    bool m_frameGenerationEnabled=false;
+    uint32_t m_frameGenerationMultiplier=2;
+    bool m_temporalMaskBypass=false;
+    // STEP 05B DLSS-G 2x bring-up
+    // STEP 04H V-Sync toggle
     // STEP 04G-4 playback-clock subtitle sync
     HWND m_subtitleWnd=nullptr;
     // STEP 04G media track selection
@@ -270,6 +287,13 @@ public:
             if(fpsElapsed>=0.75){
                 m_submitFps=double(m_fpsWindowFrames)/fpsElapsed;m_fpsWindowFrames=0;m_fpsWindowStart=fpsNow;
                 if(m_renderer){
+                    const uint64_t totalDisplayed=m_renderer->FrameGenerationDisplayedFramesTotal();
+                    const uint64_t deltaDisplayed=totalDisplayed>=m_lastDisplayedFramesTotal?totalDisplayed-m_lastDisplayedFramesTotal:0u;
+                    m_displayFps=deltaDisplayed?double(deltaDisplayed)/fpsElapsed:m_submitFps;
+                    m_lastDisplayedFramesTotal=totalDisplayed;
+                    m_actualDisplayRatio=m_submitFps>0.01?m_displayFps/m_submitFps:1.0;
+                }else{m_displayFps=m_submitFps;m_actualDisplayRatio=1.0;}
+                if(m_renderer){
                     const auto aiStats=m_aiDepthTemporalWorker.GetStats();
                     const double aiAgeMs=(aiStats.latestTimestamp100ns>=0&&m_lastRenderedTs>=aiStats.latestTimestamp100ns)?double(m_lastRenderedTs-aiStats.latestTimestamp100ns)*1.0e-4:-1.0;
                     LOG("[Perf] submitFps="<<m_submitFps<<" sourceFps="<<m_decoder.FrameRate()<<" dropped="<<m_droppedFrames<<" frameMs="<<m_lastFrameProcessMs<<" input="<<m_renderer->DLSSInputW()<<"x"<<m_renderer->DLSSInputH()<<" output="<<m_renderer->OutputW()<<"x"<<m_renderer->OutputH()<<" aiTempMs="<<aiStats.emaProcessMs<<" aiQ="<<aiStats.queueDepth<<" aiQReset="<<aiStats.queueResets<<" aiAgeMs="<<aiAgeMs);
@@ -318,6 +342,10 @@ private:
         m_colorSettings.temperature=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Temperature",0.0f),-1.0f,1.0f);
         m_colorSettings.tint=std::clamp(ReadIniFloat(L"VideoAdjustments",L"Tint",0.0f),-1.0f,1.0f);
         m_splitFraction=std::clamp(ReadIniFloat(L"SplitScreen",L"Fraction",0.5f),0.05f,0.95f);
+        m_vsyncEnabled=ReadIniFloat(L"Playback",L"VSync",1.0f)>=0.5f;
+        m_frameGenerationEnabled=ReadIniFloat(L"Playback",L"FrameGeneration2x",0.0f)>=0.5f;
+        m_frameGenerationMultiplier=uint32_t(std::clamp(int(std::lround(ReadIniFloat(L"Playback",L"FrameGenerationMultiplier",2.0f))),2,6));
+        m_temporalMaskBypass=ReadIniFloat(L"Temporal",L"MaskBypass",0.0f)>=0.5f;
         const auto path=SettingsPath();
         m_fullscreenAutoHide=GetPrivateProfileIntW(L"UI",L"FullscreenAutoHide",1,path.c_str())!=0;
     }
@@ -330,13 +358,17 @@ private:
         WriteIniFloat(L"VideoAdjustments",L"Temperature",m_colorSettings.temperature);
         WriteIniFloat(L"VideoAdjustments",L"Tint",m_colorSettings.tint);
         WriteIniFloat(L"SplitScreen",L"Fraction",m_splitFraction);
+        WriteIniFloat(L"Playback",L"VSync",m_vsyncEnabled?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"FrameGeneration2x",m_frameGenerationEnabled?1.0f:0.0f);
+        WriteIniFloat(L"Playback",L"FrameGenerationMultiplier",float(m_frameGenerationMultiplier));
+        WriteIniFloat(L"Temporal",L"MaskBypass",m_temporalMaskBypass?1.0f:0.0f);
         const auto path=SettingsPath();
         WritePrivateProfileStringW(L"UI",L"FullscreenAutoHide",m_fullscreenAutoHide?L"1":L"0",path.c_str());
     }
 
     void ApplyVideoAdjustments(bool refreshPaused=true){
         if(m_renderer){
-            m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetSplitScreen(m_splitScreen);m_renderer->SetSplitFraction(m_splitFraction);
+            m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetSplitScreen(m_splitScreen);m_renderer->SetSplitFraction(m_splitFraction);m_renderer->SetVSync(m_vsyncEnabled);m_renderer->SetFrameGeneration(m_frameGenerationEnabled,m_frameGenerationMultiplier);
             if(refreshPaused&&!m_playing&&!m_seeking)m_renderer->PresentCurrent();
         }
     }
@@ -543,7 +575,7 @@ private:
     }
     HMENU CreateMenuBar() {
         HMENU audioTracks=CreatePopupMenu(),subtitleTracks=CreatePopupMenu();
-        HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu(),nvof=CreatePopupMenu(),nvofPerf=CreatePopupMenu(),nvofGrid=CreatePopupMenu(),depthSource=CreatePopupMenu();m_nvofPerfMenu=nvofPerf;m_nvofGridMenu=nvofGrid;m_depthSourceMenu=depthSource;
+        HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu(),nvof=CreatePopupMenu(),nvofPerf=CreatePopupMenu(),nvofGrid=CreatePopupMenu(),depthSource=CreatePopupMenu(),frameGen=CreatePopupMenu();m_nvofPerfMenu=nvofPerf;m_nvofGridMenu=nvofGrid;m_depthSourceMenu=depthSource;
         auto add=[&](HMENU m,UINT id,const wchar_t* key){std::wstring s=T(key);AppendMenuW(m,MF_STRING,id,s.c_str());};
         add(file,IDM_OPEN,L"menu.open"); AppendMenuW(file,MF_SEPARATOR,0,nullptr); add(file,IDM_EXIT,L"menu.exit");
         add(play,IDM_PLAY,L"menu.playpause"); add(play,IDM_STOP,L"menu.stop"); add(play,IDM_BACK10,L"menu.back10"); add(play,IDM_FWD10,L"menu.forward10"); add(play,IDM_MUTE,L"menu.mute");
@@ -552,8 +584,16 @@ private:
         AppendMenuW(subtitleTracks,MF_STRING|(m_selectedSubtitleStream<0?MF_CHECKED:MF_UNCHECKED),IDM_SUBTITLE_OFF,L"Off");
         for(size_t i=0;i<m_mediaTracks.SubtitleTracks().size()&&i<90;++i){const auto&t=m_mediaTracks.SubtitleTracks()[i];const auto label=MediaTrackCatalog::MenuLabel(t);UINT flags=MF_STRING|(t.streamIndex==m_selectedSubtitleStream?MF_CHECKED:MF_UNCHECKED);if(!t.textSubtitleSupported)flags|=MF_GRAYED;AppendMenuW(subtitleTracks,flags,IDM_SUBTITLE_TRACK_BASE+UINT(i),label.c_str());}
         AppendMenuW(play,MF_POPUP,reinterpret_cast<UINT_PTR>(audioTracks),L"Audio Track");
-        AppendMenuW(play,MF_POPUP,reinterpret_cast<UINT_PTR>(subtitleTracks),L"Subtitles");        add(video,IDM_ASPECT_FIT,L"menu.aspectfit"); add(video,IDM_ASPECT_FILL,L"menu.aspectfill"); add(video,IDM_VIDEO_ADJUSTMENTS,L"menu.adjustments"); AppendMenuW(video,MF_SEPARATOR,0,nullptr);
-        add(video,IDM_VIEW_FINAL,L"menu.final"); add(video,IDM_VIEW_INPUT,L"menu.input"); add(video,IDM_VIEW_MV,L"menu.mv"); add(video,IDM_VIEW_DEPTH,L"menu.depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_AI_DEPTH,L"AI Depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_AI_HW_DEPTH,L"AI HW Depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_MASK,L"Temporal Mask"); AppendMenuW(video,MF_SEPARATOR,0,nullptr); add(video,IDM_FULLSCREEN,L"menu.fullscreen");
+        AppendMenuW(play,MF_POPUP,reinterpret_cast<UINT_PTR>(subtitleTracks),L"Subtitles");
+        AppendMenuW(play,MF_STRING|(m_vsyncEnabled?MF_CHECKED:MF_UNCHECKED),IDM_VSYNC,L"V-Sync");
+        AppendMenuW(frameGen,MF_STRING|(!m_frameGenerationEnabled?MF_CHECKED:MF_UNCHECKED),IDM_FRAMEGEN_OFF,L"Off");
+        const bool fgMenuAvailable=!m_renderer||m_renderer->FrameGenerationAvailable();
+        const uint32_t fgRuntimeMax=(m_renderer&&m_renderer->FrameGenerationAvailable())?m_renderer->FrameGenerationMaxMultiplier():6u;
+        const uint32_t fgMenuMax=m_vsyncEnabled?std::min(fgRuntimeMax,VSyncFrameGenerationCap()):fgRuntimeMax;
+        auto addFg=[&](UINT id,uint32_t mult,const wchar_t* label){UINT flags=MF_STRING;if(m_frameGenerationEnabled&&m_frameGenerationMultiplier==mult)flags|=MF_CHECKED;if(!fgMenuAvailable||(m_renderer&&mult>fgMenuMax))flags|=MF_GRAYED;AppendMenuW(frameGen,flags,id,label);};
+        addFg(IDM_FRAMEGEN_2X,2,L"DLSS-G 2x");addFg(IDM_FRAMEGEN_3X,3,L"DLSS-G 3x");addFg(IDM_FRAMEGEN_4X,4,L"DLSS-G 4x");addFg(IDM_FRAMEGEN_5X,5,L"DLSS-G 5x");addFg(IDM_FRAMEGEN_6X,6,L"DLSS-G 6x");
+        AppendMenuW(play,MF_POPUP,reinterpret_cast<UINT_PTR>(frameGen),L"Frame Generation");        add(video,IDM_ASPECT_FIT,L"menu.aspectfit"); add(video,IDM_ASPECT_FILL,L"menu.aspectfill"); add(video,IDM_VIDEO_ADJUSTMENTS,L"menu.adjustments"); AppendMenuW(video,MF_SEPARATOR,0,nullptr);
+        add(video,IDM_VIEW_FINAL,L"menu.final"); add(video,IDM_VIEW_INPUT,L"menu.input"); add(video,IDM_VIEW_MV,L"menu.mv"); add(video,IDM_VIEW_DEPTH,L"menu.depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_AI_DEPTH,L"AI Depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_AI_HW_DEPTH,L"AI HW Depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_MASK,L"Temporal Mask"); AppendMenuW(video,MF_STRING|(m_temporalMaskBypass?MF_CHECKED:MF_UNCHECKED),IDM_TEMPORAL_MASK_BYPASS,L"Temporal Mask: Bypass (Full Frame)"); AppendMenuW(video,MF_SEPARATOR,0,nullptr); add(video,IDM_FULLSCREEN,L"menu.fullscreen");
         add(quality,IDM_QUALITY_AUTO,L"menu.quality_auto"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_QUALITY,L"Quality"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_BALANCED,L"Balanced"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_PERFORMANCE,L"Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_ULTRAPERF,L"Ultra Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_DLAA,L"DLAA");
         AppendMenuW(nvofPerf,MF_STRING,IDM_NVOF_PERF_SLOW,L"Slow");AppendMenuW(nvofPerf,MF_STRING,IDM_NVOF_PERF_MEDIUM,L"Medium");AppendMenuW(nvofPerf,MF_STRING,IDM_NVOF_PERF_FAST,L"Fast");
         AppendMenuW(nvofGrid,MF_STRING,IDM_NVOF_GRID_AUTO,L"Auto");AppendMenuW(nvofGrid,MF_STRING,IDM_NVOF_GRID_1,L"1x1");AppendMenuW(nvofGrid,MF_STRING,IDM_NVOF_GRID_2,L"2x2");AppendMenuW(nvofGrid,MF_STRING,IDM_NVOF_GRID_4,L"4x4");
@@ -620,8 +660,8 @@ private:
         ShowWindow(m_viewport,SW_SHOW); Layout();
         m_renderer=std::make_unique<D3D12Renderer>();
         if(!m_renderer->Initialize(m_renderWnd,m_decoder.Width(),m_decoder.Height(),ow,oh,guideW,guideH,m_activeQuality)){std::wstring e=T(L"error.renderer"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);m_renderer.reset();m_decoder.Close();ShowWindow(m_viewport,SW_HIDE);return false;}
-        m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetSplitScreen(m_splitScreen);m_renderer->SetSplitFraction(m_splitFraction);
-        m_renderer->SetDepthSource(m_opt.depthSource);
+        m_renderer->SetColorSettings(m_colorSettings);m_renderer->SetSplitScreen(m_splitScreen);m_renderer->SetSplitFraction(m_splitFraction);m_renderer->SetVSync(m_vsyncEnabled);m_renderer->SetFrameGeneration(m_frameGenerationEnabled,m_frameGenerationMultiplier);
+        m_renderer->SetDepthSource(m_opt.depthSource);if(m_frameGenerationEnabled&&m_renderer->FrameGenerationAvailable()){uint32_t cap=m_renderer->FrameGenerationMaxMultiplier();if(m_vsyncEnabled)cap=std::min(cap,VSyncFrameGenerationCap());if(cap<2u){m_frameGenerationEnabled=false;m_renderer->SetFrameGeneration(false,m_frameGenerationMultiplier);}else{m_frameGenerationMultiplier=std::min(m_frameGenerationMultiplier,cap);m_renderer->SetFrameGeneration(true,m_frameGenerationMultiplier);}}m_lastDisplayedFramesTotal=m_renderer->FrameGenerationDisplayedFramesTotal();m_displayFps=0.0;m_actualDisplayRatio=1.0;
         m_guides.SetOutputGrid(guideW,guideH);
         m_opticalFlow.reset();
         if(nvofRuntime){
@@ -741,6 +781,9 @@ private:
             const auto stats=m_aiDepthTemporalWorker.GetStats();
             const double ageMs=(f.timestamp100ns>=aiTemporal->currentTimestamp100ns)?double(f.timestamp100ns-aiTemporal->currentTimestamp100ns)*1.0e-4:0.0;
             LOG("[AI Temporal Async] health: currentTs="<<f.timestamp100ns<<" stableTs="<<aiTemporal->currentTimestamp100ns<<" ageMs="<<ageMs<<" norm="<<aiTemporal->normalizedLo<<".."<<aiTemporal->normalizedHi<<" history="<<aiTemporal->historyCoverage<<" workerMs="<<stats.emaProcessMs<<" queue="<<stats.queueDepth<<" queueResets="<<stats.queueResets);
+        }
+        if(m_temporalMaskBypass&&!g.guideGridRGBA32F.empty()){
+            for(size_t i=3;i<g.guideGridRGBA32F.size();i+=4u)g.guideGridRGBA32F[i]=0.0f;
         }
         const float* aiPreview=(aiTemporalValid&&!aiTemporal->preview01.empty())?aiTemporal->preview01.data():nullptr;
         const size_t aiBytes=aiPreview?aiTemporal->preview01.size()*sizeof(float):0;
@@ -953,7 +996,13 @@ private:
         HDC mem=CreateCompatibleDC(dc);HBITMAP bmp=CreateCompatibleBitmap(dc,W,H);HGDIOBJ old=SelectObject(mem,bmp);HBRUSH bg=CreateSolidBrush(RGB(24,25,29));FillRect(mem,&c,bg);DeleteObject(bg);
         HGDIOBJ op=SelectObject(mem,GetStockObject(DC_PEN));SetDCPenColor(mem,RGB(57,60,66));MoveToEx(mem,0,0,nullptr);LineTo(mem,c.right,0);SelectObject(mem,op);
         DrawButton(mem,ButtonRect(0),L"Open",false,m_hoverButton==0);DrawButton(mem,ButtonRect(1),L"\u23EA",false,m_hoverButton==1);DrawButton(mem,ButtonRect(2),m_playing?L"\u23F8":L"\u25B6",m_playing,m_hoverButton==2);DrawButton(mem,ButtonRect(3),L"\u23F9",false,m_hoverButton==3);DrawButton(mem,ButtonRect(4),L"\u23E9",false,m_hoverButton==4);
-        DrawButton(mem,ButtonRect(5),m_renderer&&m_renderer->DLSSEnabled()?L"DLSS ON":L"DLSS OFF",m_renderer&&m_renderer->DLSSEnabled(),m_hoverButton==5);DrawButton(mem,ButtonRect(6),m_fill?L"Crop":L"Fit",m_fill,m_hoverButton==6);DrawButton(mem,ButtonRect(7),L"Color",m_adjustWnd!=nullptr,m_hoverButton==7);DrawButton(mem,ButtonRect(8),L"Re-hook",false,m_hoverButton==8);
+        // STEP 05C v1.1 UI clarity hotfix: toolbar buttons express user-selected modes.
+        // Actual raw-DLSS execution is diagnosed independently from FeatureCreated/EvaluationCount/logs;
+        // do not turn a transient backend availability detail into a permanent "WAIT" user state.
+        const bool dlssRequested=m_renderer&&m_renderer->DLSSRequested();
+        const std::wstring dlssButton=dlssRequested?L"DLSS ON":L"DLSS OFF";
+        const bool fgAvailable=m_renderer&&m_renderer->FrameGenerationAvailable();const std::wstring fgButton=fgAvailable?(m_frameGenerationEnabled?(L"FG "+std::to_wstring(m_frameGenerationMultiplier)+L"x"):L"FG OFF"):L"FG N/A";
+        DrawButton(mem,ButtonRect(5),dlssButton,dlssRequested,m_hoverButton==5);DrawButton(mem,ButtonRect(6),m_fill?L"Crop":L"Fit",m_fill,m_hoverButton==6);DrawButton(mem,ButtonRect(7),L"Color",m_adjustWnd!=nullptr,m_hoverButton==7);DrawButton(mem,ButtonRect(8),fgButton,m_frameGenerationEnabled&&fgAvailable,m_hoverButton==8);
         DrawButton(mem,ButtonRect(9),L"MV",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::MotionVectors,m_hoverButton==9);DrawButton(mem,ButtonRect(10),L"Depth",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::Depth,m_hoverButton==10);DrawButton(mem,ButtonRect(11),L"T-Mask",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::BiasMask,m_hoverButton==11);DrawButton(mem,ButtonRect(12),L"Full",m_fullscreen,m_hoverButton==12);DrawButton(mem,ButtonRect(13),L"Auto UI",m_fullscreenAutoHide,m_hoverButton==13);DrawButton(mem,ButtonRect(14),L"AI Depth",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::AIDepth,m_hoverButton==14);DrawButton(mem,ButtonRect(15),L"HW Z",m_renderer&&m_renderer->GetDebugView()==D3D12Renderer::DebugView::AIHardwareDepth,m_hoverButton==15);
 
         RECT vr=VolumeRect();op=SelectObject(mem,GetStockObject(DC_PEN));SetDCPenColor(mem,RGB(94,98,105));MoveToEx(mem,vr.left,(vr.top+vr.bottom)/2,nullptr);LineTo(mem,vr.right,(vr.top+vr.bottom)/2);SelectObject(mem,op);int vx=vr.left+int((vr.right-vr.left)*(m_muted?0.0f:m_volume));HGDIOBJ ob=SelectObject(mem,GetStockObject(DC_BRUSH));SelectObject(mem,GetStockObject(DC_PEN));SetDCBrushColor(mem,RGB(230,232,235));SetDCPenColor(mem,RGB(230,232,235));Ellipse(mem,vx-5,(vr.top+vr.bottom)/2-5,vx+5,(vr.top+vr.bottom)/2+5);SelectObject(mem,ob);
@@ -963,7 +1012,12 @@ private:
 
         SetBkMode(mem,TRANSPARENT);SetTextColor(mem,RGB(202,205,211));auto of=SelectObject(mem,m_fontSmall);std::wstring time=TimeText(shown)+L" / "+TimeText(d);TextOutW(mem,18,c.bottom-43,time.c_str(),int(time.size()));
         std::wstringstream st;if(m_seeking||m_seekPending)st<<T(L"status.seeking")<<L"  |  ";st<<L"source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())st<<L" -> decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();st<<L"  |  "<<QualityNameW(m_activeQuality)<<L"  |  input "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L"  |  output "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L"  |  drop "<<m_droppedFrames;if(m_opticalFlow)st<<L"  |  NVOF Grid "<<m_opticalFlow->GridSize()<<L"x"<<m_opticalFlow->GridSize();st<<L"  |  Depth "<<DepthSourceNameW(m_opt.depthSource);std::wstring status=st.str();RECT sr{145,c.bottom-48,std::max<LONG>(146,c.right-445),c.bottom-28};DrawTextW(mem,status.c_str(),-1,&sr,DT_LEFT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
-        RECT fr=FpsRect();const double sourceFps=m_decoder.FrameRate();const bool fpsLow=m_submitFps>0.0&&sourceFps>0.0&&(m_submitFps+0.5<sourceFps);SetTextColor(mem,fpsLow?RGB(238,76,76):RGB(216,219,224));std::wstring fps=L"FPS "+std::to_wstring(int(std::lround(m_submitFps)))+L" / "+std::to_wstring(int(std::lround(sourceFps)));DrawTextW(mem,fps.c_str(),-1,&fr,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        const double sourceFps=m_decoder.FrameRate();const bool fpsLow=m_submitFps>0.0&&sourceFps>0.0&&(m_submitFps+0.5<sourceFps);SetTextColor(mem,fpsLow?RGB(238,76,76):RGB(216,219,224));
+        const LONG fpsLeft=std::max<LONG>(160,c.right-560);RECT fr{fpsLeft,c.bottom-48,c.right-18,c.bottom-28};
+        wchar_t fpsBuf[224]{};
+        if(m_frameGenerationEnabled)swprintf_s(fpsBuf,L"Video %.2f FPS | Display %.1f FPS | DLSS-G %ux",sourceFps,m_displayFps,m_frameGenerationMultiplier);
+        else swprintf_s(fpsBuf,L"Video %.2f FPS | Display %.1f FPS | Frame Gen OFF",sourceFps,m_displayFps);
+        std::wstring fps=fpsBuf;DrawTextW(mem,fps.c_str(),-1,&fr,DT_RIGHT|DT_VCENTER|DT_SINGLELINE|DT_END_ELLIPSIS);
         SetTextColor(mem,RGB(202,205,211));std::wstring vol=m_muted?T(L"status.muted"):(T(L"status.volume")+L" "+std::to_wstring(int(m_volume*100))+L"%");RECT vl{vr.left,vr.top-23,vr.right,vr.top-5};DrawTextW(mem,vol.c_str(),-1,&vl,DT_CENTER|DT_VCENTER|DT_SINGLELINE);SelectObject(mem,of);
         BitBlt(dc,0,0,W,H,mem,0,0,SRCCOPY);SelectObject(mem,old);DeleteObject(bmp);DeleteDC(mem);EndPaint(m_controlsWnd,&ps);
     }
@@ -1007,24 +1061,37 @@ private:
         reg(HK_SPLIT_RESET,MOD_CONTROL|MOD_ALT,'0',"Ctrl+Alt+0");
         reg(HK_SPLIT_LEFT,MOD_CONTROL|MOD_ALT,VK_OEM_COMMA,"Ctrl+Alt+,");
         reg(HK_SPLIT_RIGHT,MOD_CONTROL|MOD_ALT,VK_OEM_PERIOD,"Ctrl+Alt+.");
+        reg(HK_VSYNC,MOD_CONTROL|MOD_ALT,'V',"Ctrl+Alt+V");
+        reg(HK_FRAMEGEN,MOD_CONTROL|MOD_ALT,'G',"Ctrl+Alt+G");
         if(!RegisterHotKey(m_hwnd,HK_MEDIA_PLAY_PAUSE,MOD_NOREPEAT,VK_MEDIA_PLAY_PAUSE))LOG("Media Play/Pause hotkey unavailable winerr="<<GetLastError());
     }
-    void UnregisterOverlayHotkeys(){if(!m_hwnd)return;for(int id:{HK_PLAY_PAUSE,HK_BACK_10,HK_FORWARD_10,HK_MUTE,HK_DLSS,HK_ADJUSTMENTS,HK_SPLIT_SCREEN,HK_SPLIT_RESET,HK_SPLIT_LEFT,HK_SPLIT_RIGHT,HK_MEDIA_PLAY_PAUSE})UnregisterHotKey(m_hwnd,id);}
+    void UnregisterOverlayHotkeys(){if(!m_hwnd)return;for(int id:{HK_PLAY_PAUSE,HK_BACK_10,HK_FORWARD_10,HK_MUTE,HK_DLSS,HK_ADJUSTMENTS,HK_SPLIT_SCREEN,HK_SPLIT_RESET,HK_SPLIT_LEFT,HK_SPLIT_RIGHT,HK_VSYNC,HK_FRAMEGEN,HK_MEDIA_PLAY_PAUSE})UnregisterHotKey(m_hwnd,id);}
     void HandleHotkey(int id){
-        switch(id){case HK_PLAY_PAUSE:case HK_MEDIA_PLAY_PAUSE:TogglePause();break;case HK_BACK_10:RequestSeek(Position()-10);break;case HK_FORWARD_10:RequestSeek(Position()+10);break;case HK_MUTE:ToggleMute();break;case HK_DLSS:ToggleDLSS();break;case HK_ADJUSTMENTS:ShowAdjustments();break;case HK_SPLIT_SCREEN:ToggleSplitScreen();break;case HK_SPLIT_RESET:ResetSplitDivider();break;case HK_SPLIT_LEFT:NudgeSplitDivider(-0.05f);break;case HK_SPLIT_RIGHT:NudgeSplitDivider(0.05f);break;}
+        switch(id){case HK_PLAY_PAUSE:case HK_MEDIA_PLAY_PAUSE:TogglePause();break;case HK_BACK_10:RequestSeek(Position()-10);break;case HK_FORWARD_10:RequestSeek(Position()+10);break;case HK_MUTE:ToggleMute();break;case HK_DLSS:ToggleDLSS();break;case HK_ADJUSTMENTS:ShowAdjustments();break;case HK_SPLIT_SCREEN:ToggleSplitScreen();break;case HK_SPLIT_RESET:ResetSplitDivider();break;case HK_SPLIT_LEFT:NudgeSplitDivider(-0.05f);break;case HK_SPLIT_RIGHT:NudgeSplitDivider(0.05f);break;case HK_VSYNC:ToggleVSync();break;case HK_FRAMEGEN:ToggleFrameGeneration();break;}
     }
 
     void OpenFromDialog(){auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
     void MouseDown(int x,int y){SetFocus(m_hwnd);if(!m_loaded&&PtIn(EmptyOpenRect(),x,y))OpenFromDialog();}
     void ControlsMouseDown(int x,int y){
         SetFocus(m_hwnd);if(!m_loaded||m_seeking)return;m_lastFullscreenMouse=Clock::now();RECT tr=TimelineRect();if(PtIn(tr,x,y)){m_dragSeek=true;m_seekPreview=SecondsFromX(x);SetCapture(m_controlsWnd);InvalidateRect(m_controlsWnd,&tr,FALSE);return;}RECT vr=VolumeRect();if(PtIn(vr,x,y)){m_muted=false;m_dragVolume=true;SetCapture(m_controlsWnd);SetVolumeFromX(x);return;}if(PtIn(MuteRect(),x,y)){ToggleMute();return;}
-        const int b=HitTestButton(x,y);switch(b){case 0:OpenFromDialog();break;case 1:RequestSeek(Position()-10);break;case 2:TogglePause();break;case 3:StopPlayback();break;case 4:RequestSeek(Position()+10);break;case 5:ToggleDLSS();break;case 6:m_fill=!m_fill;Layout();break;case 7:ShowAdjustments();break;case 8:Rehook();break;case 9:ToggleDebug(D3D12Renderer::DebugView::MotionVectors);break;case 10:ToggleDebug(D3D12Renderer::DebugView::Depth);break;case 11:ToggleDebug(D3D12Renderer::DebugView::BiasMask);break;case 12:ToggleFullscreen();break;case 13:ToggleFullscreenAutoHide();break;case 14:ToggleDebug(D3D12Renderer::DebugView::AIDepth);break;case 15:ToggleDebug(D3D12Renderer::DebugView::AIHardwareDepth);break;}
+        const int b=HitTestButton(x,y);switch(b){case 0:OpenFromDialog();break;case 1:RequestSeek(Position()-10);break;case 2:TogglePause();break;case 3:StopPlayback();break;case 4:RequestSeek(Position()+10);break;case 5:ToggleDLSS();break;case 6:m_fill=!m_fill;Layout();break;case 7:ShowAdjustments();break;case 8:CycleFrameGeneration();break;case 9:ToggleDebug(D3D12Renderer::DebugView::MotionVectors);break;case 10:ToggleDebug(D3D12Renderer::DebugView::Depth);break;case 11:ToggleDebug(D3D12Renderer::DebugView::BiasMask);break;case 12:ToggleFullscreen();break;case 13:ToggleFullscreenAutoHide();break;case 14:ToggleDebug(D3D12Renderer::DebugView::AIDepth);break;case 15:ToggleDebug(D3D12Renderer::DebugView::AIHardwareDepth);break;}
     }
 
     double SecondsFromX(int x)const{RECT r=TimelineRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);double t=double(LONG(x)-r.left)/double(span);return std::clamp(t,0.0,1.0)*m_decoder.DurationSeconds();}
     void SetVolumeFromX(int x){RECT r=VolumeRect();const LONG span=(r.right>r.left)?(r.right-r.left):LONG(1);m_volume=float(std::clamp(double(LONG(x)-r.left)/double(span),0.0,1.0));m_audio.SetVolume(m_volume);InvalidateControls();}
     void ToggleMute(){m_muted=!m_muted;m_audio.SetVolume(m_muted?0.0f:m_volume);InvalidateControls();}
-    void ToggleDLSS(){if(!m_renderer)return;m_renderer->SetDLSS(!m_renderer->DLSSEnabled());m_dlssReset=true;if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
+    void ToggleDLSS(){
+        if(!m_renderer)return;
+        const bool next=!m_renderer->DLSSRequested();
+        const bool fgWasRequested=m_frameGenerationEnabled;const uint32_t fgMultiplier=m_frameGenerationMultiplier;
+        if(fgWasRequested)m_renderer->SetFrameGeneration(false,fgMultiplier);
+        m_renderer->SetDLSS(next);m_dlssReset=true;
+        if(next&&!m_renderer->DLSSAvailable())m_renderer->RequestDLSSRecreate();
+        if(fgWasRequested)m_renderer->SetFrameGeneration(true,fgMultiplier);
+        if(!m_playing)m_renderer->PresentCurrent();
+        InvalidateControls();UpdateTitle();
+        LOG("[DLSS] UI request="<<(next?"ON":"OFF")<<" available="<<(m_renderer->DLSSAvailable()?1:0)<<" active="<<(m_renderer->DLSSEnabled()?1:0)<<" FGRestored="<<(fgWasRequested?1:0));
+    }
     bool SplitDividerHitTest(int x,int tolerance=12)const{
         if(!m_splitScreen||!m_renderer||m_renderer->GetDebugView()!=D3D12Renderer::DebugView::Final||!m_renderWnd)return false;
         RECT r{};GetClientRect(m_renderWnd,&r);const int w=std::max(1,int(r.right-r.left));
@@ -1080,6 +1147,76 @@ private:
         RebuildMenuBar();UpdateTitle();
         LOG("[Subtitles Async] selection requested stream="<<t.streamIndex<<"; video/render thread continues immediately");
     }
+    void ToggleTemporalMaskBypass(){
+        m_temporalMaskBypass=!m_temporalMaskBypass;
+        m_guides.Reset();m_guideReset=true;m_dlssReset=true;
+        SaveVideoSettings();RebuildMenuBar();UpdateTitle();InvalidateControls();
+        LOG("[Temporal Mask] mode="<<(m_temporalMaskBypass?"BYPASS_FULL_FRAME":"ADAPTIVE")
+            <<" biasCurrentColorW="<<(m_temporalMaskBypass?0:1));
+    }
+    double CurrentDisplayRefreshHz()const{
+        HWND ref=m_renderWnd?m_renderWnd:m_hwnd;
+        HMONITOR monitor=MonitorFromWindow(ref,MONITOR_DEFAULTTONEAREST);
+        MONITORINFOEXW info{};info.cbSize=sizeof(info);
+        if(!monitor||!GetMonitorInfoW(monitor,reinterpret_cast<MONITORINFO*>(&info)))return 60.0;
+        DEVMODEW mode{};mode.dmSize=sizeof(mode);
+        if(!EnumDisplaySettingsW(info.szDevice,ENUM_CURRENT_SETTINGS,&mode))return 60.0;
+        const double hz=double(mode.dmDisplayFrequency);
+        return hz>=20.0&&hz<=1000.0?hz:60.0;
+    }
+    uint32_t VSyncFrameGenerationCap()const{
+        if(!m_vsyncEnabled)return 6u;
+        const double source=m_decoder.FrameRate(),refresh=CurrentDisplayRefreshHz();
+        if(!std::isfinite(source)||source<=1.0||!std::isfinite(refresh)||refresh<20.0)return 6u;
+        const int cap=int(std::floor((refresh+0.25)/source));
+        return uint32_t(std::clamp(cap,1,6));
+    }
+    void SetFrameGenerationMode(bool enabled,uint32_t multiplier){
+        multiplier=std::clamp(multiplier,2u,6u);
+        if(enabled&&m_renderer&&!m_renderer->FrameGenerationAvailable()){LOG("[DLSS-G] UI request ignored: runtime unavailable");return;}
+        if(enabled&&m_renderer)multiplier=std::min(multiplier,m_renderer->FrameGenerationMaxMultiplier());
+        if(enabled&&m_vsyncEnabled){
+            const uint32_t cap=VSyncFrameGenerationCap();
+            if(cap<2u){
+                LOG("[DLSS-G] VSync safety disabled FG: source="<<m_decoder.FrameRate()<<" refresh="<<CurrentDisplayRefreshHz()<<"Hz");
+                enabled=false;
+            }else if(multiplier>cap){
+                LOG("[DLSS-G] VSync safety cap requested="<<multiplier<<"x effective="<<cap<<"x source="<<m_decoder.FrameRate()<<" refresh="<<CurrentDisplayRefreshHz()<<"Hz");
+                multiplier=cap;
+            }
+        }
+        m_frameGenerationEnabled=enabled;m_frameGenerationMultiplier=multiplier;
+        if(m_renderer)m_renderer->SetFrameGeneration(enabled,multiplier);
+        SaveVideoSettings();RebuildMenuBar();UpdateTitle();InvalidateControls();
+        LOG("[DLSS-G] UI mode="<<(enabled?"ON":"OFF")<<" requestedMultiplier="<<multiplier
+            <<" maxMultiplier="<<(m_renderer?m_renderer->FrameGenerationMaxMultiplier():1u)
+            <<" available="<<(m_renderer&&m_renderer->FrameGenerationAvailable()?1:0));
+    }
+    void CycleFrameGeneration(){
+        if(m_renderer&&!m_renderer->FrameGenerationAvailable()){LOG("[DLSS-G] toolbar cycle ignored: runtime unavailable");return;}
+        uint32_t maxMult=m_renderer?std::max(2u,m_renderer->FrameGenerationMaxMultiplier()):6u;
+        if(m_vsyncEnabled)maxMult=std::min(maxMult,VSyncFrameGenerationCap());
+        if(maxMult<2u){SetFrameGenerationMode(false,m_frameGenerationMultiplier);return;}
+        if(!m_frameGenerationEnabled){SetFrameGenerationMode(true,2u);return;}
+        if(m_frameGenerationMultiplier<maxMult){SetFrameGenerationMode(true,m_frameGenerationMultiplier+1u);return;}
+        SetFrameGenerationMode(false,m_frameGenerationMultiplier);
+    }
+    void ToggleFrameGeneration(){CycleFrameGeneration();}
+    void ToggleVSync(){
+        m_vsyncEnabled=!m_vsyncEnabled;
+        if(m_renderer){
+            m_renderer->SetVSync(m_vsyncEnabled);
+            if(m_frameGenerationEnabled&&m_vsyncEnabled){
+                const uint32_t cap=VSyncFrameGenerationCap();
+                if(cap<2u){m_frameGenerationEnabled=false;m_renderer->SetFrameGeneration(false,m_frameGenerationMultiplier);LOG("[DLSS-G] VSync safety disabled FG after VSync ON");}
+                else if(m_frameGenerationMultiplier>cap){LOG("[DLSS-G] VSync safety cap after VSync ON requested="<<m_frameGenerationMultiplier<<"x effective="<<cap<<"x");m_frameGenerationMultiplier=cap;m_renderer->SetFrameGeneration(true,cap);}
+                else m_renderer->SetFrameGeneration(true,m_frameGenerationMultiplier);
+            }else m_renderer->SetFrameGeneration(m_frameGenerationEnabled,m_frameGenerationMultiplier);
+            if(!m_playing)m_renderer->PresentCurrent();
+        }
+        SaveVideoSettings();RebuildMenuBar();UpdateTitle();InvalidateControls();
+        LOG("[VSync] "<<(m_vsyncEnabled?"ON":"OFF")<<" presentSyncInterval="<<(m_vsyncEnabled?1:0));
+    }
     void ToggleSplitScreen(){
         m_splitScreen=!m_splitScreen;
         if(m_renderer){m_renderer->SetSplitScreen(m_splitScreen);m_renderer->SetSplitFraction(m_splitFraction);if(!m_playing)m_renderer->PresentCurrent();}if(!m_splitScreen&&m_splitDragging)EndSplitDrag();
@@ -1088,7 +1225,14 @@ private:
         InvalidateControls();UpdateTitle();
     }
     void Rehook(){if(m_renderer){m_renderer->RequestDLSSRecreate();m_dlssReset=true;}}
-    void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){m_opt.qualityExplicit=!automatic;m_opt.quality=q;if(m_loaded&&!m_path.empty()){std::wstring p=m_path;double keep=Position();bool wasPlaying=m_playing;if(Load(p))RequestSeek(keep,wasPlaying);}}
+    void SetQualityMode(bool automatic,NVSDK_NGX_PerfQuality_Value q){
+        m_opt.qualityExplicit=!automatic;m_opt.quality=q;
+        if(m_loaded&&!m_path.empty()){
+            if(m_renderer&&m_frameGenerationEnabled)m_renderer->SetFrameGeneration(false,m_frameGenerationMultiplier);
+            std::wstring p=m_path;double keep=Position();bool wasPlaying=m_playing;
+            if(Load(p))RequestSeek(keep,wasPlaying);
+        }
+    }
     void ToggleDepthMode(){auto n=m_guides.GetDepthMode()==TemporalGuideGenerator::DepthMode::Estimated?TemporalGuideGenerator::DepthMode::Flat:TemporalGuideGenerator::DepthMode::Estimated;m_guides.SetDepthMode(n);m_guideReset=true;m_dlssReset=true;UpdateTitle();}
     void SetDebug(D3D12Renderer::DebugView v){if(m_renderer){m_renderer->SetDebugView(v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}}
     void ToggleDebug(D3D12Renderer::DebugView v){if(!m_renderer)return;m_renderer->SetDebugView(m_renderer->GetDebugView()==v?D3D12Renderer::DebugView::Final:v);if(!m_playing)m_renderer->PresentCurrent();InvalidateControls();}
@@ -1121,6 +1265,10 @@ private:
     }
 
     void HandleCommand(UINT id){
+        if(id==IDM_TEMPORAL_MASK_BYPASS){ToggleTemporalMaskBypass();return;}
+        if(id==IDM_FRAMEGEN_OFF){SetFrameGenerationMode(false,m_frameGenerationMultiplier);return;}
+        if(id>=IDM_FRAMEGEN_2X&&id<=IDM_FRAMEGEN_6X){SetFrameGenerationMode(true,2u+uint32_t(id-IDM_FRAMEGEN_2X));return;}
+        if(id==IDM_VSYNC){ToggleVSync();return;}
         if(id>=IDM_AUDIO_TRACK_BASE&&id<IDM_AUDIO_TRACK_BASE+90){SelectAudioTrack(size_t(id-IDM_AUDIO_TRACK_BASE));return;}
         if(id==IDM_SUBTITLE_OFF){SelectSubtitleOff();return;}
         if(id>=IDM_SUBTITLE_TRACK_BASE&&id<IDM_SUBTITLE_TRACK_BASE+90){SelectSubtitleTrack(size_t(id-IDM_SUBTITLE_TRACK_BASE));return;}
@@ -1137,7 +1285,7 @@ private:
     AppOptions m_opt;Localizer m_loc;std::vector<std::wstring> m_languageCodes;D3D12Renderer::ColorSettings m_colorSettings{};NVSDK_NGX_PerfQuality_Value m_activeQuality=NVSDK_NGX_PerfQuality_Value_MaxQuality;HWND m_hwnd=nullptr,m_viewport=nullptr,m_renderWnd=nullptr,m_controlsWnd=nullptr,m_tooltipWnd=nullptr,m_adjustWnd=nullptr;HMENU m_menuBar=nullptr,m_nvofPerfMenu=nullptr,m_nvofGridMenu=nullptr,m_depthSourceMenu=nullptr;HFONT m_font=nullptr,m_fontSmall=nullptr;
     bool m_running=true,m_loaded=false,m_playing=false,m_haveNext=false,m_fill=false,m_fullscreen=false,m_dragSeek=false,m_dragVolume=false,m_muted=false,m_seekPending=false,m_seekResumePlaying=false,m_seeking=false,m_fullscreenAutoHide=true,m_fullscreenControlsHidden=false,m_trackingMouseLeave=false;
     LONG m_savedStyle=0;RECT m_savedRect{};double m_dar=16.0/9.0,m_currentSec=0,m_playStartSec=0,m_seekPreview=0,m_pendingSeekSec=0;float m_volume=1.0f,m_lastGlobalX=0,m_lastGlobalY=0;int m_mouseX=-999,m_mouseY=-999,m_hoverButton=-1;
-    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now(),m_lastFullscreenMouse=Clock::now();double m_submitFps=0.0;bool m_lastGuideHardwareFastPath=false,m_lastGuideLegacyFlow=false;double m_lastGuidesMs=0.0,m_lastRendererMs=0.0;double m_lastFrameProcessMs=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;std::unique_ptr<OpticalFlowEngine>m_opticalFlow;TemporalGuideGenerator m_guides;AudioPlayer m_audio;
+    Clock::time_point m_playStart=Clock::now(),m_fpsWindowStart=Clock::now(),m_lastStaticPresent=Clock::now(),m_lastFullscreenMouse=Clock::now();double m_submitFps=0.0,m_displayFps=0.0,m_actualDisplayRatio=1.0;uint64_t m_lastDisplayedFramesTotal=0;bool m_lastGuideHardwareFastPath=false,m_lastGuideLegacyFlow=false;double m_lastGuidesMs=0.0,m_lastRendererMs=0.0;double m_lastFrameProcessMs=0.0;uint64_t m_fpsWindowFrames=0;std::wstring m_path;VideoDecoder m_decoder;VideoFrame m_next;std::unique_ptr<D3D12Renderer>m_renderer;std::unique_ptr<OpticalFlowEngine>m_opticalFlow;TemporalGuideGenerator m_guides;AudioPlayer m_audio;
     std::unique_ptr<AIDepthWorker>m_aiDepthWorker;AIDepthFrame m_aiDepthLatest{};uint64_t m_aiDepthSequence=0;AIDepthTemporalWorker m_aiDepthTemporalWorker;
     bool m_guideReset=true,m_dlssReset=true;int64_t m_lastRenderedTs=-1;uint64_t m_droppedFrames=0,m_uiTick=0;
 };

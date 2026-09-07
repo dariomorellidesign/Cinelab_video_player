@@ -41,6 +41,7 @@ public:
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
     bool DLSSEnabled() const { return m_dlssEnabled && m_dlss.Available(); }
+    bool DLSSRequested() const { return m_dlssEnabled; }
     uint32_t DLSSInputW() const { return m_renderW; }
     uint32_t DLSSInputH() const { return m_renderH; }
     uint32_t OutputW() const { return m_outputW; }
@@ -49,6 +50,15 @@ public:
     void SetDebugView(DebugView v) { m_debugView = v; }
     DebugView GetDebugView() const { return m_debugView; }
     void SetSplitScreen(bool enabled) { m_splitScreen = enabled; }
+    void SetVSync(bool enabled) { m_vsyncEnabled = enabled; }
+    bool VSyncEnabled() const { return m_vsyncEnabled; }
+    void SetFrameGeneration(bool enabled, uint32_t multiplier=2);
+    bool FrameGenerationRequested() const { return m_frameGenerationEnabled; }
+    uint32_t FrameGenerationMultiplier() const { return m_frameGenerationMultiplier; }
+    bool FrameGenerationAvailable() const;
+    uint32_t FrameGenerationMaxMultiplier() const;
+    uint32_t FrameGenerationFramesActuallyPresented() const;
+    uint64_t FrameGenerationDisplayedFramesTotal() const { return m_frameGenerationDisplayedFramesTotal; }
     void SetSplitFraction(float fraction) { m_splitFraction = fraction; }
     float SplitFraction() const { return m_splitFraction; }
     void SetSubtitleText(const std::wstring& text);
@@ -80,6 +90,8 @@ private:
 
     void DrawSplitComparison(ID3D12GraphicsCommandList* cmd, bool dlssUsed);
     bool CreateSubtitleResources();
+    bool CreateFrameGenerationResources();
+    void CaptureFrameGenerationHudless(ID3D12GraphicsCommandList* cmd, uint32_t slot, uint32_t backbufferIndex);
     bool BuildSubtitleBitmap(const std::wstring& text);
     void DrawSubtitleOverlay(ID3D12GraphicsCommandList* cmd, uint32_t slot);
     bool CreateDeviceAndSwapchain(HWND hwnd);
@@ -164,6 +176,17 @@ private:
     uint8_t* m_guideMapped[FrameCount]{};
     uint8_t* m_aiDepthMapped[FrameCount]{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
+    // STEP 05B: one immutable-at-present HUD-less copy per frame slot.
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgHudless[FrameCount];
+    D3D12_RESOURCE_STATES m_fgHudlessState[FrameCount]{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgUiAlpha;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_fgUiAlphaUpload;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_fgUiAlphaFootprint{};
+    D3D12_RESOURCE_STATES m_fgUiAlphaState = D3D12_RESOURCE_STATE_COPY_DEST;
+    bool m_fgUiAlphaInitialized = false;
+    bool m_frameGenerationEnabled = false;
+    bool m_frameGenerationActiveThisFrame = false;
+    uint32_t m_frameGenerationFrameIndex = 0;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_subtitleFootprint{};
     uint8_t* m_subtitleUploadMapped[FrameCount]{};
@@ -195,9 +218,12 @@ private:
     bool m_outputInUAV = true;
     bool m_dlssEnabled = true;
     bool m_allowTearing = false;
+    bool m_vsyncEnabled = true; // STEP 04H: policy; m_allowTearing remains only a DXGI capability.
     bool m_recreateRequested = false;
     bool m_delayedRecreateDone = false;
     uint64_t m_framesPresented = 0;
+    uint64_t m_frameGenerationDisplayedFramesTotal = 0;
+    uint32_t m_frameGenerationMultiplier = 2;
     DebugView m_debugView = DebugView::Final;
     ColorSettings m_colorSettings{};
     bool m_lastDLSSUsed = false;

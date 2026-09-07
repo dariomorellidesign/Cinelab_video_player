@@ -1,4 +1,5 @@
 #include "DLSSBackend.h"
+#include "DLSSFrameGeneration.h"
 #include "Log.h"
 #include <windows.h>
 #include <filesystem>
@@ -25,18 +26,57 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
 
     // Custom engine/project identity is the officially supported NGX route for
     // non-engine samples. It is intentionally stable across runs.
-    m_lastResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
-        "50f09991-2962-44db-bad7-4be06dbbd1d2",
-        NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-        "DLSSVideoPlayer-10.0",
-        logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
-    if (NVSDK_NGX_FAILED(m_lastResult)) {
-        LOG("NGX Init failed result=0x" << std::hex << m_lastResult);
-        return false;
+    m_ngxSessionBorrowedFromStreamline = DLSSFrameGenerationRuntime::Instance().OwnsNgxSessionFor(device);
+    if (m_ngxSessionBorrowedFromStreamline) {
+        // Streamline already owns the NGX process/device context. Keep using the raw
+        // NGX parameter/CreateFeature/Evaluate API, but do not initialize NGX twice.
+        m_initialized = true;
+        LOG("[DLSS-G] Raw DLSS borrowing Streamline-owned NGX session on current D3D12 device.");
+    } else {
+        m_lastResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
+            "50f09991-2962-44db-bad7-4be06dbbd1d2",
+            NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+            "DLSSVideoPlayer-10.0",
+            logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
+        if (NVSDK_NGX_FAILED(m_lastResult)) {
+            LOG("NGX Init failed result=0x" << std::hex << m_lastResult);
+            return false;
+        }
+        m_initialized = true;
     }
-    m_initialized = true;
 
-    m_lastResult = NVSDK_NGX_D3D12_GetCapabilityParameters(&m_params);
+    // STEP 05C-1.3 RAW NGX direct co-init after Streamline.
+    // Streamline can own/use NGX internally while the application's direct NGX API is still
+    // uninitialized. The captured 0xbad00007 is NVSDK_NGX_Result_FAIL_NotInitialized.
+    // Probe the raw API first; co-init only for that exact state and keep every other failure visible.
+    if (m_ngxSessionBorrowedFromStreamline) {
+        NVSDK_NGX_Parameter* directProbe = nullptr;
+        m_lastResult = NVSDK_NGX_D3D12_GetCapabilityParameters(&directProbe);
+        if (m_lastResult == NVSDK_NGX_Result_FAIL_NotInitialized) {
+            LOG("[DLSS-G] RAW NGX direct API reports NotInitialized after Streamline startup; co-initializing raw D3D12 NGX on the same device.");
+            m_lastResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
+                "50f09991-2962-44db-bad7-4be06dbbd1d2",
+                NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+                "DLSSVideoPlayer-10.0",
+                logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
+            if (NVSDK_NGX_FAILED(m_lastResult)) {
+                LOG("[DLSS-G] RAW NGX co-init failed result=0x" << std::hex << m_lastResult);
+                return false;
+            }
+            m_ngxRawCoInitWithStreamline = true;
+            m_initialized = true;
+            LOG("[DLSS-G] RAW NGX co-init SUCCESS; direct capability/CreateFeature/Evaluate path armed for RenoDX.");
+        } else if (NVSDK_NGX_FAILED(m_lastResult) || !directProbe) {
+            LOG("[DLSS-G] RAW NGX direct capability probe failed result=0x" << std::hex << m_lastResult);
+            return false;
+        } else {
+            m_params = directProbe;
+            LOG("[DLSS-G] RAW NGX direct API was already initialized; co-init not required.");
+        }
+    }
+    if (!m_params) {
+        m_lastResult = NVSDK_NGX_D3D12_GetCapabilityParameters(&m_params);
+    }
     if (NVSDK_NGX_FAILED(m_lastResult) || !m_params) {
         LOG("NGX GetCapabilityParameters failed result=0x" << std::hex << m_lastResult);
         return false;
@@ -323,7 +363,14 @@ void DLSSBackend::Shutdown() {
         m_params = nullptr;
     }
     if (m_initialized) {
-        NVSDK_NGX_D3D12_Shutdown1(m_device);
+        if (m_ngxSessionBorrowedFromStreamline) {
+            if (m_ngxRawCoInitWithStreamline) LOG("[DLSS-G] RAW NGX co-init retained until Streamline/process teardown; raw feature/parameters released first.");
+            LOG("[DLSS-G] Raw DLSS released borrowed NGX session; Streamline retains global NGX ownership.");
+        } else {
+            NVSDK_NGX_D3D12_Shutdown1(m_device);
+        }
+        m_ngxSessionBorrowedFromStreamline = false;
+        m_ngxRawCoInitWithStreamline = false;
         m_initialized = false;
     }
     m_device = nullptr;

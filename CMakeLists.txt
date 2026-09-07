@@ -273,3 +273,16 @@ target_sources(DLSSVideoPlayer PRIVATE src/SplitScreenLayout.cpp)
 
 # Step 04G media stream selection + post-DLSS text subtitles
 target_sources(DLSSVideoPlayer PRIVATE src/MediaTracks.cpp src/SubtitlePlayer.cpp)
+
+# STEP 05B Streamline headers - runtime is loaded dynamically; no NVIDIA binary is linked or redistributed here.
+set(DMP_STREAMLINE_SDK "${CMAKE_SOURCE_DIR}/external/streamline-sdk-v2.12.0" CACHE PATH "Pinned NVIDIA Streamline SDK root")
+if(NOT EXISTS "${DMP_STREAMLINE_SDK}/include/sl.h" OR NOT EXISTS "${DMP_STREAMLINE_SDK}/include/sl_dlss_g.h")
+    message(FATAL_ERROR "Step05B requires the Streamline SDK fetched by Step05A at ${DMP_STREAMLINE_SDK}")
+endif()
+foreach(dmp_sl_target DLSSVideoPlayer NeuralWorker UpscalingGpuSmoke PolicyTests PlayerUiRegressionTests)
+    if(TARGET ${dmp_sl_target})
+        target_include_directories(${dmp_sl_target} PRIVATE "${DMP_STREAMLINE_SDK}/include")
+    endif()
+endforeach()
+target_sources(DLSSVideoPlayer PRIVATE src/DLSSFrameGeneration.h)
+# STEP 05B Streamline headers END

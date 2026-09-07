@@ -1,5 +1,6 @@
 #include "D3D12Renderer.h"
 #include "SplitScreenLayout.h"
+#include "DLSSFrameGeneration.h"
 #include "SubtitleOverlayLayout.h"
 #include "Log.h"
 #include <d3dcompiler.h>
@@ -40,6 +41,7 @@ D3D12Renderer::~D3D12Renderer() {
         m_subtitleUploadMapped[i]=nullptr;
     }
     m_dlss.Shutdown();
+    DLSSFrameGenerationRuntime::Instance().ShutdownForDevice(m_device.Get()); // device-safe: retired renderer cannot shut down a newer Streamline session
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
 }
 
@@ -53,11 +55,13 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
     }
     if(!CreateVideoResources()) return false;
     if(!CreateSubtitleResources()) return false;
+    if(!CreateFrameGenerationResources()) return false;
     LOG("V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs + R8 bias; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.");
     return true;
 }
 
 bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
+    auto& frameGen=DLSSFrameGenerationRuntime::Instance();frameGen.InitializeProcess();
     UINT ff=0;
 #if defined(_DEBUG)
     ComPtr<ID3D12Debug> dbg; if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dbg)))) { dbg->EnableDebugLayer(); ff|=DXGI_CREATE_FACTORY_DEBUG; }
@@ -74,7 +78,15 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     DXGI_ADAPTER_DESC1 ad{};m_adapter->GetDesc1(&ad);LOG("D3D12 adapter vendor=0x"<<std::hex<<ad.VendorId<<" device=0x"<<ad.DeviceId);
     if(!HR(D3D12CreateDevice(m_adapter.Get(),D3D_FEATURE_LEVEL_12_0,IID_PPV_ARGS(&m_device)),"D3D12CreateDevice"))return false;
     D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;
-    if(!HR(m_device->CreateCommandQueue(&q,IID_PPV_ARGS(&m_queue)),"CreateCommandQueue"))return false;
+    ID3D12Device* queueDevice=frameGen.UpgradeDeviceForQueue(m_device.Get());
+    HRESULT queueHr=queueDevice->CreateCommandQueue(&q,IID_PPV_ARGS(&m_queue));
+    // STEP 05B v1.6 retain Streamline manual-hook proxies.
+    // Streamline's D3D12CommandQueue proxy stores the upgraded D3D12Device proxy as its parent.
+    // Releasing that device proxy here leaves the queue with a dangling parent before DXGI asks
+    // the queue for its device while creating the swapchain. Keep it process-lifetime for bring-up,
+    // matching the validated Step05A-1 manual-hook probe. Production ownership comes later.
+    if(queueDevice!=m_device.Get())LOG("[DLSS-G] retaining D3D12 device proxy for command-queue lifetime");
+    if(!HR(queueHr,"CreateCommandQueue"))return false;
     for(uint32_t i=0;i<FrameCount;++i) {
         if(!HR(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&m_allocators[i])),"CreateCommandAllocator"))return false;
     }
@@ -85,8 +97,13 @@ bool D3D12Renderer::CreateDeviceAndSwapchain(HWND hwnd) {
     BOOL tearing=FALSE;if(SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))m_allowTearing=tearing==TRUE;
     DXGI_SWAP_CHAIN_DESC1 sd{};sd.Width=m_outputW;sd.Height=m_outputH;sd.Format=DXGI_FORMAT_R8G8B8A8_UNORM;sd.SampleDesc={1,0};sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount=FrameCount;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;sd.Flags=m_allowTearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0;
-    ComPtr<IDXGISwapChain1>sc1;if(!HR(m_factory->CreateSwapChainForHwnd(m_queue.Get(),hwnd,&sd,nullptr,nullptr,&sc1),"CreateSwapChainForHwnd"))return false;
+    IDXGIFactory6* swapFactory=frameGen.UpgradeFactoryForSwapchain(m_factory.Get());
+    ComPtr<IDXGISwapChain1>sc1;if(!HR(swapFactory->CreateSwapChainForHwnd(m_queue.Get(),hwnd,&sd,nullptr,nullptr,&sc1),"CreateSwapChainForHwnd"))return false;
     m_factory->MakeWindowAssociation(hwnd,DXGI_MWA_NO_ALT_ENTER);sc1.As(&m_swapchain);
+    // Keep the manual-hook DXGI factory proxy alive for the same conservative bring-up lifetime.
+    // The short-lived Step05A-1 probe intentionally did not release upgraded proxies before shutdown.
+    if(swapFactory!=m_factory.Get())LOG("[DLSS-G] retaining DXGI factory proxy after swapchain creation");
+    frameGen.OnSwapchainCreated(m_swapchain.Get());
     if(m_swapchain) m_swapchain->SetMaximumFrameLatency(2);
     if(!HR(m_device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&m_fence)),"CreateFence"))return false;
     m_fenceEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);return m_fenceEvent!=nullptr;
@@ -305,6 +322,10 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     const bool haveAIDepth=aiDepthPreview01&&aiDepthW==AIDepthW&&aiDepthH==AIDepthH&&aiDepthBytes>=size_t(AIDepthW)*AIDepthH*sizeof(float);
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot)) return false;
+    ++m_frameGenerationFrameIndex;
+    m_frameGenerationActiveThisFrame=m_frameGenerationEnabled&&m_fgHudless[slot]&&
+        DLSSFrameGenerationRuntime::Instance().BeginFrame(m_debugView==DebugView::Final,
+            m_frameGenerationFrameIndex,temporalReset);
     CopyMappedRows(m_uploadMapped[slot],m_uploadFootprint,bgra,videoRow,m_sourceH);
     CopyMappedRows(m_guideMapped[slot],m_guideFootprint,guideGridRGBA32F,guideRow,m_gridH);
     if(haveAIDepth)CopyMappedRows(m_aiDepthMapped[slot],m_aiDepthFootprint,aiDepthPreview01,size_t(AIDepthW)*sizeof(float),AIDepthH);
@@ -460,12 +481,29 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     cmd->DrawInstanced(3,1,0,0);
     if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
     }
+    CaptureFrameGenerationHudless(cmd,slot,bi);
     DrawSubtitleOverlay(cmd,slot);
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close frame command list")) return false;
-    ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
+    ID3D12CommandList*ls[]={cmd};
+    auto& fgRuntime=DLSSFrameGenerationRuntime::Instance();
+    if(m_frameGenerationActiveThisFrame)fgRuntime.MarkRenderSubmitStart();
+    m_queue->ExecuteCommandLists(1,ls);
+    if(m_frameGenerationActiveThisFrame){
+        fgRuntime.MarkRenderSubmitEnd();
+        if(!fgRuntime.PreparePresent(m_depth.Get(),static_cast<uint32_t>(DepthGuideReadState),
+            m_motion.Get(),static_cast<uint32_t>(GuideReadState),m_fgHudless[slot].Get(),
+            static_cast<uint32_t>(m_fgHudlessState[slot]),m_fgUiAlpha.Get(),
+            static_cast<uint32_t>(m_fgUiAlphaState),temporalReset))m_frameGenerationActiveThisFrame=false;
+    }
+    const bool fgPresentedThisFrame=m_frameGenerationActiveThisFrame;
+    if(fgPresentedThisFrame)fgRuntime.MarkPresentStart();
+    HRESULT phr=m_swapchain->Present(m_vsyncEnabled?1u:0u,(!m_vsyncEnabled&&m_allowTearing)?DXGI_PRESENT_ALLOW_TEARING:0u);
+    if(fgPresentedThisFrame){fgRuntime.MarkPresentEnd();fgRuntime.AfterPresent();}
+    m_frameGenerationActiveThisFrame=false;
     if(FAILED(phr)){LOG("Present failed hr=0x"<<std::hex<<phr);return false;}
+    const uint32_t displayedThisPresent=fgPresentedThisFrame?std::max(1u,fgRuntime.LastFramesActuallyPresented()):1u;
+    m_frameGenerationDisplayedFramesTotal+=displayedThisPresent;
     SignalFrameSlot(slot);
     m_frameSlot=(slot+1u)%FrameCount;
     return true;
@@ -559,7 +597,7 @@ void D3D12Renderer::SetSubtitleText(const std::wstring& text){
 }
 
 void D3D12Renderer::DrawSubtitleOverlay(ID3D12GraphicsCommandList*cmd,uint32_t slot){
-    if(!cmd||m_debugView!=DebugView::Final||m_subtitleText.empty()||!m_subtitleTexture||slot>=FrameCount)return;
+    if(m_frameGenerationActiveThisFrame||!cmd||m_debugView!=DebugView::Final||m_subtitleText.empty()||!m_subtitleTexture||slot>=FrameCount)return;
     if(m_subtitleDirty){
         const size_t tight=size_t(m_subtitleTexW)*4u;
         if(m_subtitlePixels.size()<tight*size_t(m_subtitleTexH))return;
@@ -576,7 +614,85 @@ void D3D12Renderer::DrawSubtitleOverlay(ID3D12GraphicsCommandList*cmd,uint32_t s
     D3D12_RECT sc{layout.dstX,layout.dstY,layout.dstX+layout.dstW,layout.dstY+layout.dstH};
     cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoSubtitle.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(SubtitleSrvIndex));cmd->DrawInstanced(3,1,0,0);
 }
+bool D3D12Renderer::CreateFrameGenerationResources(){
+    auto& fg=DLSSFrameGenerationRuntime::Instance();
+    if(!fg.FeatureReady())return true;
+    fg.Configure(m_renderW,m_renderH,m_outputW,m_outputH,FrameCount);
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc=Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_NONE);
+    for(uint32_t i=0;i<FrameCount;++i){
+        if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,
+            D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_fgHudless[i])),
+            "Create DLSS-G HUD-less frame"))return false;
+        m_fgHudlessState[i]=D3D12_RESOURCE_STATE_COPY_DEST;
+        std::wstring name=L"DLSSG_HUDLess_RGBA8_"+std::to_wstring(i);m_fgHudless[i]->SetName(name.c_str());
+    }
+
+    // No UI is composited into the D3D12 backbuffer while FG is active in Step05B.
+    // Tag an immutable all-zero R8 UI-alpha texture so Final == HUD-less exactly and
+    // newer OTA plugins that request a UI tag still receive a valid full-size resource.
+    auto uiDesc=Tex2D(DXGI_FORMAT_R8_UNORM,m_outputW,m_outputH,D3D12_RESOURCE_FLAG_NONE);
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&uiDesc,
+        D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_fgUiAlpha)),
+        "Create DLSS-G zero UI alpha"))return false;
+    m_fgUiAlpha->SetName(L"DLSSG_UIAlpha_Zero_R8");
+    UINT64 uploadBytes=0;
+    m_device->GetCopyableFootprints(&uiDesc,0,1,0,&m_fgUiAlphaFootprint,nullptr,nullptr,&uploadBytes);
+    D3D12_RESOURCE_DESC uploadDesc{};uploadDesc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;uploadDesc.Alignment=0;
+    uploadDesc.Width=uploadBytes;uploadDesc.Height=1;uploadDesc.DepthOrArraySize=1;uploadDesc.MipLevels=1;
+    uploadDesc.Format=DXGI_FORMAT_UNKNOWN;uploadDesc.SampleDesc.Count=1;uploadDesc.SampleDesc.Quality=0;
+    uploadDesc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;uploadDesc.Flags=D3D12_RESOURCE_FLAG_NONE;
+    auto up=HeapProps(D3D12_HEAP_TYPE_UPLOAD);
+    if(!HR(m_device->CreateCommittedResource(&up,D3D12_HEAP_FLAG_NONE,&uploadDesc,
+        D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&m_fgUiAlphaUpload)),
+        "Create DLSS-G zero UI alpha upload"))return false;
+    void* mapped=nullptr;if(!HR(m_fgUiAlphaUpload->Map(0,nullptr,&mapped),"Map DLSS-G zero UI alpha"))return false;
+    std::memset(mapped,0,static_cast<size_t>(uploadBytes));m_fgUiAlphaUpload->Unmap(0,nullptr);
+    m_fgUiAlphaState=D3D12_RESOURCE_STATE_COPY_DEST;m_fgUiAlphaInitialized=false;
+    LOG("[DLSS-G] HUD-less ring ready "<<m_outputW<<"x"<<m_outputH<<" slots="<<FrameCount
+        <<" zeroUIAlpha=R8 depth=m_depth(D32 hardware-Z) motion=m_motion(RG16F current-to-previous)");
+    return true;
+}
+
+void D3D12Renderer::SetFrameGeneration(bool enabled,uint32_t multiplier){
+    multiplier=std::clamp(multiplier,2u,6u);m_frameGenerationEnabled=enabled;m_frameGenerationMultiplier=multiplier;
+    DLSSFrameGenerationRuntime::Instance().SetRequested(enabled,multiplier);
+    LOG("[DLSS-G] application request="<<(enabled?"ON":"OFF")<<" multiplier="<<multiplier
+        <<" runtimeReady="<<(DLSSFrameGenerationRuntime::Instance().FeatureReady()?1:0)
+        <<" maxMultiplier="<<DLSSFrameGenerationRuntime::Instance().MaxMultiplier());
+}
+
+bool D3D12Renderer::FrameGenerationAvailable()const{
+    return DLSSFrameGenerationRuntime::Instance().FeatureReady();
+}
+
+uint32_t D3D12Renderer::FrameGenerationMaxMultiplier()const{
+    return DLSSFrameGenerationRuntime::Instance().MaxMultiplier();
+}
+
+uint32_t D3D12Renderer::FrameGenerationFramesActuallyPresented()const{
+    return DLSSFrameGenerationRuntime::Instance().LastFramesActuallyPresented();
+}
+
+void D3D12Renderer::CaptureFrameGenerationHudless(ID3D12GraphicsCommandList*cmd,uint32_t slot,uint32_t backbufferIndex){
+    if(!m_frameGenerationActiveThisFrame||!cmd||slot>=FrameCount||backbufferIndex>=FrameCount||!m_fgHudless[slot]||!m_fgUiAlpha)return;
+    if(!m_fgUiAlphaInitialized){
+        D3D12_TEXTURE_COPY_LOCATION dst{};dst.pResource=m_fgUiAlpha.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;dst.SubresourceIndex=0;
+        D3D12_TEXTURE_COPY_LOCATION src{};src.pResource=m_fgUiAlphaUpload.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=m_fgUiAlphaFootprint;
+        cmd->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        Barrier(cmd,m_fgUiAlpha.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        m_fgUiAlphaState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;m_fgUiAlphaInitialized=true;
+    }
+    Barrier(cmd,m_backbuffers[backbufferIndex].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    if(m_fgHudlessState[slot]!=D3D12_RESOURCE_STATE_COPY_DEST)
+        Barrier(cmd,m_fgHudless[slot].Get(),m_fgHudlessState[slot],D3D12_RESOURCE_STATE_COPY_DEST);
+    cmd->CopyResource(m_fgHudless[slot].Get(),m_backbuffers[backbufferIndex].Get());
+    Barrier(cmd,m_fgHudless[slot].Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    m_fgHudlessState[slot]=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    Barrier(cmd,m_backbuffers[backbufferIndex].Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+}
 bool D3D12Renderer::PresentCurrent(){
+    m_frameGenerationActiveThisFrame=false;DLSSFrameGenerationRuntime::Instance().SuspendForStaticPresent();
     if(!m_swapchain||!m_queue||!m_rootSig)return false;
     const uint32_t slot=m_frameSlot%FrameCount;
     if(!WaitForFrameSlot(slot))return false;
@@ -625,7 +741,7 @@ bool D3D12Renderer::PresentCurrent(){
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close static-present command list"))return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
-    HRESULT phr=m_swapchain->Present(0,m_allowTearing?DXGI_PRESENT_ALLOW_TEARING:0);
+    HRESULT phr=m_swapchain->Present(m_vsyncEnabled?1u:0u,(!m_vsyncEnabled&&m_allowTearing)?DXGI_PRESENT_ALLOW_TEARING:0u);
     if(FAILED(phr)){LOG("Static Present failed hr=0x"<<std::hex<<phr);return false;}
     SignalFrameSlot(slot);m_frameSlot=(slot+1u)%FrameCount;
     return true;

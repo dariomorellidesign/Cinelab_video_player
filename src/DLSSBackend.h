@@ -64,6 +64,8 @@ private:
     NVSDK_NGX_PerfQuality_Value m_quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
     NVSDK_NGX_Result m_lastResult = NVSDK_NGX_Result_Fail;
     bool m_initialized = false;
+    bool m_ngxSessionBorrowedFromStreamline = false;
+    bool m_ngxRawCoInitWithStreamline = false; // STEP 05C-1.3 raw direct API ownership // STEP 05B: legacy direct NGX session borrow guard
     bool m_available = false;
     uint64_t m_evaluations = 0;
     bool m_lastEvaluationUsedC = true;
