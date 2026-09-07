@@ -25,11 +25,12 @@ std::wstring AudioPlayer::FindFFmpeg() {
     return (n && n < std::size(found)) ? std::wstring(found) : std::wstring();
 }
 
-bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds) {
+bool AudioPlayer::Start(const std::wstring& videoPath, double seekSeconds, int streamIndex) {
     Stop();
     m_seekBaseSec = std::max(0.0, seekSeconds);
     m_hasAudioData = false;
     m_path = videoPath;
+    m_streamIndex = streamIndex;
     m_ffmpeg = FindFFmpeg();
     if (m_ffmpeg.empty()) { LOG("Audio: ffmpeg.exe not found."); return false; }
 
@@ -66,8 +67,10 @@ bool AudioPlayer::StartProcess(double seekSeconds) {
     std::wostringstream args;
     args << L"-hide_banner -loglevel error -nostdin ";
     if (seekSeconds > 0.0) args << L"-ss " << std::fixed << std::setprecision(6) << seekSeconds << L" ";
-    args << L"-i " << Q(m_path)
-         << L" -map 0:a:0? -vn -sn -dn -ac 2 -ar 48000 -c:a pcm_s16le -f s16le pipe:1";
+    args << L"-i " << Q(m_path) << L" ";
+    if (m_streamIndex >= 0) args << L"-map 0:" << m_streamIndex << L"? ";
+    else args << L"-map 0:a:0? ";
+    args << L"-vn -sn -dn -ac 2 -ar 48000 -c:a pcm_s16le -f s16le pipe:1";
     std::wstring cmd = Q(m_ffmpeg) + L" " + args.str();
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end()); mutableCmd.push_back(L'\0');
     PROCESS_INFORMATION pi{};
@@ -76,7 +79,7 @@ bool AudioPlayer::StartProcess(double seekSeconds) {
     CloseHandle(writePipe); if (nul) CloseHandle(nul);
     if (!ok) { CloseHandle(readPipe); LOG("Audio: CreateProcess(ffmpeg) failed winerr=" << GetLastError()); return false; }
     CloseHandle(pi.hThread); m_process = pi.hProcess; m_stdout = readPipe;
-    LOG("Audio: FFmpeg PCM/WaveOut path started at " << seekSeconds << " s.");
+    LOG("Audio: FFmpeg PCM/WaveOut path started at " << seekSeconds << " s stream=" << m_streamIndex);
     return true;
 }
 
@@ -182,7 +185,7 @@ bool AudioPlayer::Seek(double seconds) {
     std::wstring path = m_path;
     Stop();
     m_volume = vol;
-    bool ok = Start(path, std::max(0.0, seconds));
+    bool ok = Start(path, std::max(0.0, seconds), m_streamIndex);
     if (ok && wasPaused) Pause(true);
     return ok;
 }

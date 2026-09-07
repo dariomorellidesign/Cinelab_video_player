@@ -270,3 +270,6 @@ target_sources(DLSSVideoPlayer PRIVATE src/SceneCutDetector.cpp)
 
 # Step 04F synchronized split-screen comparator
 target_sources(DLSSVideoPlayer PRIVATE src/SplitScreenLayout.cpp)
+
+# Step 04G media stream selection + post-DLSS text subtitles
+target_sources(DLSSVideoPlayer PRIVATE src/MediaTracks.cpp src/SubtitlePlayer.cpp)

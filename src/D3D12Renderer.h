@@ -4,6 +4,8 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <cstdint>
+#include <string>
+#include <vector>
 #include "DLSSBackend.h"
 
 class D3D12Renderer {
@@ -49,6 +51,7 @@ public:
     void SetSplitScreen(bool enabled) { m_splitScreen = enabled; }
     void SetSplitFraction(float fraction) { m_splitFraction = fraction; }
     float SplitFraction() const { return m_splitFraction; }
+    void SetSubtitleText(const std::wstring& text);
     bool SplitScreenEnabled() const { return m_splitScreen; }
     void ResetAIDepthDebug() { m_aiDepthClearPending = true; m_aiDepthValid = false; m_aiHardwareDepthClearPending = true; m_aiHardwareDepthValid = false; }
     void RequestDLSSRecreate() { m_recreateRequested = true; }
@@ -64,6 +67,8 @@ public:
 
 private:
     static constexpr uint32_t FrameCount = 3;
+    static constexpr uint32_t SubtitleSrvIndex = 10;
+    // STEP 04G-3 D3D12 subtitle compositor
     static constexpr uint32_t AIDepthW = 518;
     static constexpr uint32_t AIDepthH = 518;
     // NVIDIA's D3D12 DLSS contract expects input resources in NON_PIXEL_SHADER_RESOURCE
@@ -74,6 +79,9 @@ private:
         D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
     void DrawSplitComparison(ID3D12GraphicsCommandList* cmd, bool dlssUsed);
+    bool CreateSubtitleResources();
+    bool BuildSubtitleBitmap(const std::wstring& text);
+    void DrawSubtitleOverlay(ID3D12GraphicsCommandList* cmd, uint32_t slot);
     bool CreateDeviceAndSwapchain(HWND hwnd);
     bool CreateHeapsAndBackbuffers();
     bool CreatePipelines();
@@ -125,6 +133,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rootSig;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoConvert;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoPresent;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoSubtitle;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoMotionDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthDebug;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoAIHardwareDepthDebug;
@@ -139,6 +148,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_motion;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_biasCurrent;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_dlssOutput;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_subtitleTexture;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_subtitleUpload[FrameCount];
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideGrid;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_guideUpload[FrameCount];
     // Debug-only AI relative-depth texture. It remains separate from the NGX depth input.
@@ -154,6 +165,15 @@ private:
     uint8_t* m_aiDepthMapped[FrameCount]{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_uploadFootprint{};
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_guideFootprint{};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_subtitleFootprint{};
+    uint8_t* m_subtitleUploadMapped[FrameCount]{};
+    uint32_t m_subtitleRows=0;
+    uint64_t m_subtitleRowSize=0,m_subtitleUploadBytes=0;
+    uint32_t m_subtitleTexW=0,m_subtitleTexH=0;
+    std::wstring m_subtitleText;
+    std::vector<uint8_t> m_subtitlePixels;
+    bool m_subtitleDirty=false;
+    bool m_subtitleInCopyDest=true;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT m_aiDepthFootprint{};
     uint32_t m_numRows=0,m_guideRows=0,m_aiDepthRows=0;
     uint64_t m_rowSize=0,m_uploadBytes=0,m_guideRowSize=0,m_guideUploadBytes=0,m_aiDepthRowSize=0,m_aiDepthUploadBytes=0;

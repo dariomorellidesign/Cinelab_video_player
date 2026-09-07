@@ -1,5 +1,6 @@
 #include "D3D12Renderer.h"
 #include "SplitScreenLayout.h"
+#include "SubtitleOverlayLayout.h"
 #include "Log.h"
 #include <d3dcompiler.h>
 #include <algorithm>
@@ -34,6 +35,10 @@ D3D12Renderer::~D3D12Renderer() {
         m_guideMapped[i]=nullptr;
         m_aiDepthMapped[i]=nullptr;
     }
+    for (uint32_t i=0;i<FrameCount;++i) {
+        if (m_subtitleUpload[i] && m_subtitleUploadMapped[i]) m_subtitleUpload[i]->Unmap(0,nullptr);
+        m_subtitleUploadMapped[i]=nullptr;
+    }
     m_dlss.Shutdown();
     if (m_fenceEvent) CloseHandle(m_fenceEvent);
 }
@@ -47,6 +52,7 @@ bool D3D12Renderer::Initialize(HWND hwnd,uint32_t sourceW,uint32_t sourceH,uint3
         m_renderW=std::max(1u,outputW*2u/3u); m_renderH=std::max(1u,outputH*2u/3u);
     }
     if(!CreateVideoResources()) return false;
+    if(!CreateSubtitleResources()) return false;
     LOG("V11 guide contract: compact CPU optical-flow grid expanded on GPU into full R16G16_FLOAT MVs + R8 bias; depth is written directly into the same R32_TYPELESS/D32_FLOAT resource passed to NGX; temporal reset only on discontinuities.");
     return true;
 }
@@ -90,7 +96,7 @@ bool D3D12Renderer::CreateHeapsAndBackbuffers(){
     D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=FrameCount+3;
     if(!HR(m_device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&m_rtvHeap)),"Create RTV heap"))return false;m_rtvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     for(uint32_t i=0;i<FrameCount;++i){if(!HR(m_swapchain->GetBuffer(i,IID_PPV_ARGS(&m_backbuffers[i])),"Get backbuffer"))return false;m_device->CreateRenderTargetView(m_backbuffers[i].Get(),nullptr,RTV(i));}
-    D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=10;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=11;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     if(!HR(m_device->CreateDescriptorHeap(&sh,IID_PPV_ARGS(&m_srvHeap)),"Create SRV heap"))return false;
     m_srvInc=m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_DESCRIPTOR_HEAP_DESC dh{};dh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV;dh.NumDescriptors=3;
@@ -132,6 +138,7 @@ float3 ApplyVideoAdjustments(float3 c){
     return c;
 }
 float4 PSPresent(V i):SV_Target{float3 c=T.SampleLevel(S,i.uv,0).rgb;c=ApplyVideoAdjustments(c);return float4(LinearToSRGB(c),1);}
+float4 PSSubtitle(V i):SV_Target{return T.SampleLevel(S,i.uv,0);}
 float3 hsv2rgb(float3 c){float4 K=float4(1,2.0/3.0,1.0/3.0,3);float3 p=abs(frac(c.xxx+K.xyz)*6-K.www);return c.z*lerp(K.xxx,saturate(p-K.xxx),c.y);}
 float4 PSMotion(V i):SV_Target{
     float2 m=T.SampleLevel(S,i.uv,0).rg;float mag=length(m);
@@ -153,6 +160,7 @@ float PSAIHardwareDepthWrite(V i):SV_Depth{float relativeNearness=saturate(T.Sam
 )";
     UINT flags=D3DCOMPILE_OPTIMIZATION_LEVEL3;ComPtr<ID3DBlob>vs,convert,present,motion,depth,aiHwDepthDebug,aiHwDepthWrite,depthWrite,expand,err;
     auto C=[&](const char*entry,const char*target,ComPtr<ID3DBlob>&out)->bool{err.Reset();HRESULT hr=D3DCompile(hlsl,strlen(hlsl),nullptr,nullptr,nullptr,entry,target,flags,0,&out,&err);if(FAILED(hr)){if(err)LOG((char*)err->GetBufferPointer());return false;}return true;};
+    ComPtr<ID3DBlob> subtitle;if(!C("PSSubtitle","ps_5_1",subtitle))return false;
     if(!C("VS","vs_5_1",vs)||!C("PSConvert","ps_5_1",convert)||!C("PSPresent","ps_5_1",present)||!C("PSMotion","ps_5_1",motion)||!C("PSDepth","ps_5_1",depth)||!C("PSAIHardwareDepthDebug","ps_5_1",aiHwDepthDebug)||!C("PSAIHardwareDepthWrite","ps_5_1",aiHwDepthWrite)||!C("PSWriteDepth","ps_5_1",depthWrite)||!C("PSExpandGuides","ps_5_1",expand))return false;
     D3D12_DESCRIPTOR_RANGE range{};range.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;range.NumDescriptors=1;range.BaseShaderRegister=0;
     D3D12_ROOT_PARAMETER rp[2]{};rp[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;rp[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;rp[0].DescriptorTable.NumDescriptorRanges=1;rp[0].DescriptorTable.pDescriptorRanges=&range;
@@ -170,7 +178,16 @@ float PSAIHardwareDepthWrite(V i):SV_Depth{float relativeNearness=saturate(T.Sam
     p.RTVFormats[0]=DXGI_FORMAT_R16G16B16A16_FLOAT;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoConvert)),"Create convert PSO"))return false;
     p.PS={present->GetBufferPointer(),present->GetBufferSize()};
     p.RTVFormats[0]=DXGI_FORMAT_R8G8B8A8_UNORM;if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoPresent)),"Create present PSO"))return false;
-    p.PS={motion->GetBufferPointer(),motion->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoMotionDebug)),"Create MV debug PSO"))return false;
+    p.PS={subtitle->GetBufferPointer(),subtitle->GetBufferSize()};
+    p.BlendState.RenderTarget[0].BlendEnable=TRUE;
+    p.BlendState.RenderTarget[0].SrcBlend=D3D12_BLEND_SRC_ALPHA;
+    p.BlendState.RenderTarget[0].DestBlend=D3D12_BLEND_INV_SRC_ALPHA;
+    p.BlendState.RenderTarget[0].BlendOp=D3D12_BLEND_OP_ADD;
+    p.BlendState.RenderTarget[0].SrcBlendAlpha=D3D12_BLEND_ONE;
+    p.BlendState.RenderTarget[0].DestBlendAlpha=D3D12_BLEND_INV_SRC_ALPHA;
+    p.BlendState.RenderTarget[0].BlendOpAlpha=D3D12_BLEND_OP_ADD;
+    if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoSubtitle)),"Create subtitle overlay PSO"))return false;
+    p.BlendState.RenderTarget[0].BlendEnable=FALSE;    p.PS={motion->GetBufferPointer(),motion->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoMotionDebug)),"Create MV debug PSO"))return false;
     p.PS={depth->GetBufferPointer(),depth->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoDepthDebug)),"Create depth debug PSO"))return false;
     p.PS={aiHwDepthDebug->GetBufferPointer(),aiHwDepthDebug->GetBufferSize()};if(!HR(m_device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&m_psoAIHardwareDepthDebug)),"Create AI hardware depth debug PSO"))return false;
     p.PS={expand->GetBufferPointer(),expand->GetBufferSize()};p.NumRenderTargets=2;p.RTVFormats[0]=DXGI_FORMAT_R16G16_FLOAT;p.RTVFormats[1]=DXGI_FORMAT_R8_UNORM;p.RTVFormats[2]=DXGI_FORMAT_UNKNOWN;
@@ -443,6 +460,7 @@ bool D3D12Renderer::RenderFrame(const uint8_t*bgra,size_t bytes,const float*guid
     cmd->DrawInstanced(3,1,0,0);
     if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
     }
+    DrawSubtitleOverlay(cmd,slot);
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close frame command list")) return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);
@@ -472,6 +490,91 @@ void D3D12Renderer::DrawSplitComparison(ID3D12GraphicsCommandList* cmd,bool dlss
     cmd->DrawInstanced(3,1,0,0);
     cmd->RSSetScissorRects(1,&full);
     Barrier(cmd,m_dlssColor.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,GuideReadState);
+}
+bool D3D12Renderer::CreateSubtitleResources(){
+    const auto layout=ComputeSubtitleOverlayLayout(m_outputW,m_outputH);
+    m_subtitleTexW=layout.textureW;m_subtitleTexH=layout.textureH;
+    auto hp=HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+    auto desc=Tex2D(DXGI_FORMAT_R8G8B8A8_UNORM,m_subtitleTexW,m_subtitleTexH,D3D12_RESOURCE_FLAG_NONE);
+    if(!HR(m_device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&m_subtitleTexture)),"Create subtitle texture"))return false;
+    m_subtitleTexture->SetName(L"Post_DLSS_Subtitle_Overlay_RGBA8");
+    for(uint32_t i=0;i<FrameCount;++i){
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};uint32_t rows=0;uint64_t rowBytes=0,total=0;
+        if(!CreateUploadForTexture(desc,m_subtitleUpload[i],m_subtitleUploadMapped[i],fp,rows,rowBytes,total,"Create subtitle upload"))return false;
+        if(i==0){m_subtitleFootprint=fp;m_subtitleRows=rows;m_subtitleRowSize=rowBytes;m_subtitleUploadBytes=total;}
+    }
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;srv.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+    m_device->CreateShaderResourceView(m_subtitleTexture.Get(),&srv,SRVCPU(SubtitleSrvIndex));
+    m_subtitlePixels.assign(size_t(m_subtitleTexW)*size_t(m_subtitleTexH)*4u,0u);
+    m_subtitleDirty=false;m_subtitleInCopyDest=true;
+    LOG("[Subtitles GPU] compositor ready texture="<<m_subtitleTexW<<"x"<<m_subtitleTexH<<" srv="<<SubtitleSrvIndex<<" stage=post-DLSS/post-split");
+    return true;
+}
+
+bool D3D12Renderer::BuildSubtitleBitmap(const std::wstring& text){
+    if(!m_subtitleTexW||!m_subtitleTexH)return false;
+    const size_t pixelCount=size_t(m_subtitleTexW)*size_t(m_subtitleTexH);
+    if(pixelCount>size_t(64)*1024u*1024u)return false;
+    m_subtitlePixels.assign(pixelCount*4u,0u);
+    if(text.empty())return true;
+
+    const auto layout=ComputeSubtitleOverlayLayout(m_outputW,m_outputH);
+    std::vector<uint8_t> outline(pixelCount,0u),fill(pixelCount,0u);
+    auto renderMask=[&](std::vector<uint8_t>&mask,bool drawOutline)->bool{
+        HDC dc=CreateCompatibleDC(nullptr);if(!dc)return false;
+        BITMAPINFO bmi{};bmi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bmi.bmiHeader.biWidth=LONG(m_subtitleTexW);bmi.bmiHeader.biHeight=-LONG(m_subtitleTexH);bmi.bmiHeader.biPlanes=1;bmi.bmiHeader.biBitCount=32;bmi.bmiHeader.biCompression=BI_RGB;
+        void*bits=nullptr;HBITMAP bmp=CreateDIBSection(dc,&bmi,DIB_RGB_COLORS,&bits,nullptr,0);if(!bmp||!bits){if(bmp)DeleteObject(bmp);DeleteDC(dc);return false;}
+        HGDIOBJ oldBmp=SelectObject(dc,bmp);memset(bits,0,pixelCount*4u);
+        HFONT font=CreateFontW(-layout.fontPixels,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");
+        if(!font){SelectObject(dc,oldBmp);DeleteObject(bmp);DeleteDC(dc);return false;}
+        HGDIOBJ oldFont=SelectObject(dc,font);SetBkMode(dc,TRANSPARENT);SetTextColor(dc,RGB(255,255,255));
+        const UINT fmt=DT_CENTER|DT_WORDBREAK|DT_NOPREFIX;
+        RECT calc{layout.textMarginX,0,LONG(m_subtitleTexW)-layout.textMarginX,LONG(m_subtitleTexH)};
+        DrawTextW(dc,text.c_str(),-1,&calc,fmt|DT_CALCRECT);
+        const int textH=std::max(1,int(calc.bottom-calc.top));
+        RECT tr{layout.textMarginX,std::max(0,int(m_subtitleTexH)-layout.textBottomMargin-textH),LONG(m_subtitleTexW)-layout.textMarginX,int(m_subtitleTexH)-layout.textBottomMargin};
+        if(drawOutline){
+            const int o=layout.outlinePixels;
+            for(int dy=-o;dy<=o;++dy)for(int dx=-o;dx<=o;++dx){if(dx==0&&dy==0)continue;if(dx*dx+dy*dy>o*o+1)continue;RECT q=tr;OffsetRect(&q,dx,dy);DrawTextW(dc,text.c_str(),-1,&q,fmt);}
+        }else DrawTextW(dc,text.c_str(),-1,&tr,fmt);
+        const uint8_t*src=static_cast<const uint8_t*>(bits);
+        for(size_t i=0;i<pixelCount;++i){const uint8_t*b=src+i*4u;mask[i]=std::max(b[0],std::max(b[1],b[2]));}
+        SelectObject(dc,oldFont);DeleteObject(font);SelectObject(dc,oldBmp);DeleteObject(bmp);DeleteDC(dc);return true;
+    };
+    if(!renderMask(outline,true)||!renderMask(fill,false))return false;
+    for(size_t i=0;i<pixelCount;++i){
+        const uint8_t fa=fill[i],oa=outline[i];const uint8_t a=std::max(fa,oa);if(!a)continue;
+        const uint8_t c=a?uint8_t((uint32_t(246u)*uint32_t(fa)+uint32_t(a)/2u)/uint32_t(a)):0u;uint8_t*d=m_subtitlePixels.data()+i*4u;d[0]=c;d[1]=c;d[2]=c;d[3]=a;
+    }
+    return true;
+}
+
+void D3D12Renderer::SetSubtitleText(const std::wstring& text){
+    if(text==m_subtitleText)return;
+    m_subtitleText=text;
+    if(!BuildSubtitleBitmap(text)){LOG("[Subtitles GPU] bitmap rasterization failed chars="<<text.size());m_subtitleText.clear();m_subtitlePixels.clear();m_subtitleDirty=false;return;}
+    m_subtitleDirty=!text.empty();
+    if(text.empty())LOG("[Subtitles GPU] cue cleared");
+    else LOG("[Subtitles GPU] cue rasterized chars="<<text.size()<<" band="<<m_subtitleTexW<<"x"<<m_subtitleTexH);
+}
+
+void D3D12Renderer::DrawSubtitleOverlay(ID3D12GraphicsCommandList*cmd,uint32_t slot){
+    if(!cmd||m_debugView!=DebugView::Final||m_subtitleText.empty()||!m_subtitleTexture||slot>=FrameCount)return;
+    if(m_subtitleDirty){
+        const size_t tight=size_t(m_subtitleTexW)*4u;
+        if(m_subtitlePixels.size()<tight*size_t(m_subtitleTexH))return;
+        CopyMappedRows(m_subtitleUploadMapped[slot],m_subtitleFootprint,m_subtitlePixels.data(),tight,m_subtitleTexH);
+        if(!m_subtitleInCopyDest)Barrier(cmd,m_subtitleTexture.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION dst{};dst.pResource=m_subtitleTexture.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION src{};src.pResource=m_subtitleUpload[slot].Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;src.PlacedFootprint=m_subtitleFootprint;
+        cmd->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        Barrier(cmd,m_subtitleTexture.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);m_subtitleInCopyDest=false;m_subtitleDirty=false;
+    }
+    if(m_subtitleInCopyDest)return;
+    const auto layout=ComputeSubtitleOverlayLayout(m_outputW,m_outputH);
+    D3D12_VIEWPORT vp{float(layout.dstX),float(layout.dstY),float(layout.dstW),float(layout.dstH),0,1};
+    D3D12_RECT sc{layout.dstX,layout.dstY,layout.dstX+layout.dstW,layout.dstY+layout.dstH};
+    cmd->RSSetViewports(1,&vp);cmd->RSSetScissorRects(1,&sc);cmd->SetGraphicsRootSignature(m_rootSig.Get());cmd->SetPipelineState(m_psoSubtitle.Get());cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);cmd->SetGraphicsRootDescriptorTable(0,SRVGPU(SubtitleSrvIndex));cmd->DrawInstanced(3,1,0,0);
 }
 bool D3D12Renderer::PresentCurrent(){
     if(!m_swapchain||!m_queue||!m_rootSig)return false;
@@ -518,6 +621,7 @@ bool D3D12Renderer::PresentCurrent(){
     cmd->DrawInstanced(3,1,0,0);
     if(debugPixelResource)Barrier(cmd,debugPixelResource,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,debugBefore);
     }
+    DrawSubtitleOverlay(cmd,slot);
     Barrier(cmd,m_backbuffers[bi].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
     if(!HR(cmd->Close(),"Close static-present command list"))return false;
     ID3D12CommandList*ls[]={cmd};m_queue->ExecuteCommandLists(1,ls);

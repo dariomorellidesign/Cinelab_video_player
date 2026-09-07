@@ -28,6 +28,8 @@
 #include "AIDepthTemporal.h"
 #include "AIDepthTemporalWorker.h"
 #include "AudioPlayer.h"
+#include "MediaTracks.h"
+#include "SubtitlePlayer.h"
 #include "Localization.h"
 #include "Log.h"
 
@@ -54,6 +56,9 @@ enum : UINT {
 
 static constexpr UINT IDM_SPLIT_SCREEN = 380;
 static constexpr UINT IDM_SPLIT_RESET = 381;
+static constexpr UINT IDM_AUDIO_TRACK_BASE = 600;
+static constexpr UINT IDM_SUBTITLE_OFF = 700;
+static constexpr UINT IDM_SUBTITLE_TRACK_BASE = 710;
 
 static constexpr int HK_PLAY_PAUSE = 9001;
 static constexpr int HK_BACK_10 = 9002;
@@ -172,6 +177,15 @@ class PlayerApp {
     bool m_splitScreen=false;
     float m_splitFraction=0.5f;
     bool m_splitDragging=false;
+    MediaTrackCatalog m_mediaTracks;
+    SubtitlePlayer m_subtitles;
+    int m_selectedAudioStream=-1;
+    int m_selectedSubtitleStream=-1;
+    std::wstring m_subtitleText;
+    bool m_subtitleClockAnnounced=false;
+    // STEP 04G-4 playback-clock subtitle sync
+    HWND m_subtitleWnd=nullptr;
+    // STEP 04G media track selection
     // STEP 04F-1 movable split divider
 public:
     explicit PlayerApp(AppOptions o):m_opt(std::move(o)){}
@@ -186,6 +200,7 @@ public:
         WNDCLASSW v{}; v.lpfnWndProc=ViewportWndProcStatic; v.hInstance=hi; v.lpszClassName=L"DLSSVideoViewportClassV11"; v.hCursor=LoadCursor(nullptr,IDC_ARROW); v.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); RegisterClassW(&v);
         WNDCLASSW u{}; u.style=CS_DBLCLKS; u.lpfnWndProc=ControlsWndProcStatic; u.hInstance=hi; u.lpszClassName=L"DLSSMediaControlsClassV12"; u.hCursor=LoadCursor(nullptr,IDC_ARROW); u.hbrBackground=nullptr; RegisterClassW(&u);
         WNDCLASSW a{}; a.lpfnWndProc=AdjustWndProcStatic; a.hInstance=hi; a.lpszClassName=L"DLSSVideoAdjustmentsClassV11"; a.hCursor=LoadCursor(nullptr,IDC_ARROW); a.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&a);
+        WNDCLASSW sub{}; sub.lpfnWndProc=SubtitleWndProcStatic; sub.hInstance=hi; sub.lpszClassName=L"DLSSSubtitleOverlayClass"; sub.hCursor=LoadCursor(nullptr,IDC_ARROW); sub.hbrBackground=nullptr; RegisterClassW(&sub);
         WNDCLASSW w{}; w.lpfnWndProc=WndProcStatic; w.hInstance=hi; w.lpszClassName=L"DLSSVideoPlayerV11Class"; w.hCursor=LoadCursor(nullptr,IDC_ARROW); w.hbrBackground=CreateSolidBrush(RGB(18,19,21)); RegisterClassW(&w);
         RECT rc{0,0,1440,880}; AdjustWindowRect(&rc,WS_OVERLAPPEDWINDOW,TRUE);
         const std::wstring appTitle=m_loc.Get(L"app.title");
@@ -196,6 +211,7 @@ public:
         BOOL dark=TRUE; DwmSetWindowAttribute(m_hwnd,20,&dark,sizeof(dark)); DWORD corner=2; DwmSetWindowAttribute(m_hwnd,33,&corner,sizeof(corner));
         m_viewport=CreateWindowExW(0,v.lpszClassName,nullptr,WS_CHILD|WS_CLIPCHILDREN|WS_CLIPSIBLINGS,0,0,100,100,m_hwnd,nullptr,hi,this);
         m_renderWnd=CreateWindowExW(WS_EX_ACCEPTFILES,L"DLSSVideoRenderClassV11",nullptr,WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS,0,0,100,100,m_viewport,nullptr,hi,this);
+        m_subtitleWnd=nullptr; // Step 04G-3: D3D12 backbuffer compositor replaces the invisible layered child overlay.
         m_controlsWnd=CreateWindowExW(0,L"DLSSMediaControlsClassV12",nullptr,WS_CHILD|WS_VISIBLE|WS_CLIPSIBLINGS,0,0,100,CONTROL_H,m_hwnd,nullptr,hi,this);
         if(!m_controlsWnd)return false;
         CreateDebugTooltips();
@@ -215,12 +231,12 @@ public:
         if(m_loaded&&!m_playing&&!m_seeking&&m_renderer){
             const auto nowClock=Clock::now();
             if(std::chrono::duration<double>(nowClock-m_lastStaticPresent).count()>=1.0/60.0){
-                m_renderer->PresentCurrent();
+                UpdateSubtitleForTime(Position());m_renderer->PresentCurrent();
                 m_lastStaticPresent=nowClock;
             }
         }
         if(!m_loaded||!m_playing||!m_haveNext||m_seeking) return;
-        double now=Position(); const double frameDur=1.0/std::max(1.0,m_decoder.FrameRate());
+        double now=Position(); UpdateSubtitleForTime(now); const double frameDur=1.0/std::max(1.0,m_decoder.FrameRate());
         bool dropped=false,droppedDiscontinuity=false;
         while(m_haveNext) {
             double due=double(m_next.timestamp100ns)*1e-7;
@@ -420,6 +436,13 @@ private:
         return DefWindowProcW(h,m,w,l);
     }
 
+    void PaintSubtitle(HWND h){
+        PAINTSTRUCT ps{};HDC dc=BeginPaint(h,&ps);RECT r{};GetClientRect(h,&r);HBRUSH key=CreateSolidBrush(RGB(1,2,3));FillRect(dc,&r,key);DeleteObject(key);
+        if(!m_subtitleText.empty()&&r.right>40&&r.bottom>40){const int H=std::max(1,int(r.bottom-r.top)),W=std::max(1,int(r.right-r.left));const int px=std::clamp(H/22,26,58);HFONT font=CreateFontW(-px,0,0,0,FW_SEMIBOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,ANTIALIASED_QUALITY,DEFAULT_PITCH|FF_DONTCARE,L"Segoe UI");auto old=SelectObject(dc,font);SetBkMode(dc,TRANSPARENT);RECT tr{std::max(20,W/18),int(H*0.64),W-std::max(20,W/18),H-std::max(20,H/18)};const UINT fmt=DT_CENTER|DT_WORDBREAK|DT_NOPREFIX;RECT calc=tr;DrawTextW(dc,m_subtitleText.c_str(),-1,&calc,fmt|DT_CALCRECT);const int textH=std::max(1,int(calc.bottom-calc.top));tr.top=std::max(tr.top,tr.bottom-textH);SetTextColor(dc,RGB(0,0,0));for(int dy=-2;dy<=2;++dy)for(int dx=-2;dx<=2;++dx)if(dx||dy){RECT q=tr;OffsetRect(&q,dx,dy);DrawTextW(dc,m_subtitleText.c_str(),-1,&q,fmt);}SetTextColor(dc,RGB(246,246,246));DrawTextW(dc,m_subtitleText.c_str(),-1,&tr,fmt);SelectObject(dc,old);DeleteObject(font);}
+        EndPaint(h,&ps);
+    }
+    LRESULT SubtitleWndProc(HWND h,UINT m,WPARAM w,LPARAM l){switch(m){case WM_NCHITTEST:return HTTRANSPARENT;case WM_ERASEBKGND:return 1;case WM_PAINT:PaintSubtitle(h);return 0;}return DefWindowProcW(h,m,w,l);}
+    static LRESULT CALLBACK SubtitleWndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l){PlayerApp*a=nullptr;if(m==WM_NCCREATE){auto*cs=reinterpret_cast<CREATESTRUCTW*>(l);a=static_cast<PlayerApp*>(cs->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}else a=reinterpret_cast<PlayerApp*>(GetWindowLongPtrW(h,GWLP_USERDATA));return a?a->SubtitleWndProc(h,m,w,l):DefWindowProcW(h,m,w,l);}
     static LRESULT CALLBACK WndProcStatic(HWND h,UINT m,WPARAM w,LPARAM l) {
         PlayerApp* a=nullptr;
         if(m==WM_NCCREATE){auto* cs=reinterpret_cast<CREATESTRUCTW*>(l);a=static_cast<PlayerApp*>(cs->lpCreateParams);SetWindowLongPtrW(h,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(a));}
@@ -519,11 +542,17 @@ private:
         else SetDepthSource(D3D12Renderer::DepthSource::Legacy);
     }
     HMENU CreateMenuBar() {
+        HMENU audioTracks=CreatePopupMenu(),subtitleTracks=CreatePopupMenu();
         HMENU bar=CreateMenu(),file=CreatePopupMenu(),play=CreatePopupMenu(),video=CreatePopupMenu(),dlss=CreatePopupMenu(),quality=CreatePopupMenu(),nvof=CreatePopupMenu(),nvofPerf=CreatePopupMenu(),nvofGrid=CreatePopupMenu(),depthSource=CreatePopupMenu();m_nvofPerfMenu=nvofPerf;m_nvofGridMenu=nvofGrid;m_depthSourceMenu=depthSource;
         auto add=[&](HMENU m,UINT id,const wchar_t* key){std::wstring s=T(key);AppendMenuW(m,MF_STRING,id,s.c_str());};
         add(file,IDM_OPEN,L"menu.open"); AppendMenuW(file,MF_SEPARATOR,0,nullptr); add(file,IDM_EXIT,L"menu.exit");
         add(play,IDM_PLAY,L"menu.playpause"); add(play,IDM_STOP,L"menu.stop"); add(play,IDM_BACK10,L"menu.back10"); add(play,IDM_FWD10,L"menu.forward10"); add(play,IDM_MUTE,L"menu.mute");
-        add(video,IDM_ASPECT_FIT,L"menu.aspectfit"); add(video,IDM_ASPECT_FILL,L"menu.aspectfill"); add(video,IDM_VIDEO_ADJUSTMENTS,L"menu.adjustments"); AppendMenuW(video,MF_SEPARATOR,0,nullptr);
+        if(m_mediaTracks.AudioTracks().empty())AppendMenuW(audioTracks,MF_STRING|MF_GRAYED,0,L"(No audio tracks)");
+        else for(size_t i=0;i<m_mediaTracks.AudioTracks().size()&&i<90;++i){const auto&t=m_mediaTracks.AudioTracks()[i];const auto label=MediaTrackCatalog::MenuLabel(t);AppendMenuW(audioTracks,MF_STRING|(t.streamIndex==m_selectedAudioStream?MF_CHECKED:MF_UNCHECKED),IDM_AUDIO_TRACK_BASE+UINT(i),label.c_str());}
+        AppendMenuW(subtitleTracks,MF_STRING|(m_selectedSubtitleStream<0?MF_CHECKED:MF_UNCHECKED),IDM_SUBTITLE_OFF,L"Off");
+        for(size_t i=0;i<m_mediaTracks.SubtitleTracks().size()&&i<90;++i){const auto&t=m_mediaTracks.SubtitleTracks()[i];const auto label=MediaTrackCatalog::MenuLabel(t);UINT flags=MF_STRING|(t.streamIndex==m_selectedSubtitleStream?MF_CHECKED:MF_UNCHECKED);if(!t.textSubtitleSupported)flags|=MF_GRAYED;AppendMenuW(subtitleTracks,flags,IDM_SUBTITLE_TRACK_BASE+UINT(i),label.c_str());}
+        AppendMenuW(play,MF_POPUP,reinterpret_cast<UINT_PTR>(audioTracks),L"Audio Track");
+        AppendMenuW(play,MF_POPUP,reinterpret_cast<UINT_PTR>(subtitleTracks),L"Subtitles");        add(video,IDM_ASPECT_FIT,L"menu.aspectfit"); add(video,IDM_ASPECT_FILL,L"menu.aspectfill"); add(video,IDM_VIDEO_ADJUSTMENTS,L"menu.adjustments"); AppendMenuW(video,MF_SEPARATOR,0,nullptr);
         add(video,IDM_VIEW_FINAL,L"menu.final"); add(video,IDM_VIEW_INPUT,L"menu.input"); add(video,IDM_VIEW_MV,L"menu.mv"); add(video,IDM_VIEW_DEPTH,L"menu.depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_AI_DEPTH,L"AI Depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_AI_HW_DEPTH,L"AI HW Depth"); AppendMenuW(video,MF_STRING,IDM_VIEW_MASK,L"Temporal Mask"); AppendMenuW(video,MF_SEPARATOR,0,nullptr); add(video,IDM_FULLSCREEN,L"menu.fullscreen");
         add(quality,IDM_QUALITY_AUTO,L"menu.quality_auto"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_QUALITY,L"Quality"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_BALANCED,L"Balanced"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_PERFORMANCE,L"Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_ULTRAPERF,L"Ultra Performance"); AppendMenuW(quality,MF_STRING,IDM_QUALITY_DLAA,L"DLAA");
         AppendMenuW(nvofPerf,MF_STRING,IDM_NVOF_PERF_SLOW,L"Slow");AppendMenuW(nvofPerf,MF_STRING,IDM_NVOF_PERF_MEDIUM,L"Medium");AppendMenuW(nvofPerf,MF_STRING,IDM_NVOF_PERF_FAST,L"Fast");
@@ -561,10 +590,15 @@ private:
         m_aiDepthWorker=std::move(worker);LOG("[AI Depth] isolated TensorRT-RTX sidecar armed; debug-only, not connected to NGX depth.");LOG("[AI Temporal] Step 04B active: AI Depth debug is reprojected to the current frame and temporally stabilized; still NOT connected to NGX depth.");LOG("[AI Temporal Async] Step 04B-2 active: temporal depth runs on a dedicated CPU worker; render thread never waits for it.");LOG("[AI HWDepth] Step 04C active: robust stabilized relative nearness is expanded to full-resolution conventional D3D depth (0 near, 1 far); DEBUG ONLY, NOT connected to NGX.");LOG("[NGX Depth] Step 04D active: live depth A/B = Legacy / Flat 0.75 / AI Synthetic; default Legacy; AI falls back to Legacy until valid.");
     }
     bool Load(const std::wstring& path) {
+        const bool sameMedia=!m_path.empty()&&_wcsicmp(m_path.c_str(),path.c_str())==0;
+        const int keepAudio=sameMedia?m_selectedAudioStream:-1,keepSubtitle=sameMedia?m_selectedSubtitleStream:-1;
         if(path.empty())return false;
         Unload();
         if(!m_decoder.Open(path)){std::wstring e=T(L"error.decode"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);return false;}
-        m_dar=m_decoder.DisplayAspectRatio(); if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
+        m_mediaTracks.Probe(path);
+        m_selectedAudioStream=(sameMedia&&m_mediaTracks.FindAudio(keepAudio))?keepAudio:m_mediaTracks.DefaultAudioStream();
+        m_selectedSubtitleStream=(sameMedia&&m_mediaTracks.FindSubtitle(keepSubtitle)&&m_mediaTracks.FindSubtitle(keepSubtitle)->textSubtitleSupported)?keepSubtitle:-1;
+        if(m_selectedSubtitleStream>=0)m_subtitles.LoadAsync(path,m_selectedSubtitleStream);        m_dar=m_decoder.DisplayAspectRatio(); if(!std::isfinite(m_dar)||m_dar<0.2)m_dar=double(m_decoder.Width())/std::max(1u,m_decoder.Height());
         const auto outputBox=m_opt.outputExplicit?std::make_pair(m_opt.maxW,m_opt.maxH):MonitorNativeOutputBox(m_hwnd);
         const uint32_t outputBoxW=outputBox.first,outputBoxH=outputBox.second;
         auto [ow,oh]=OutputForAspect(m_dar,outputBoxW,outputBoxH);
@@ -601,16 +635,19 @@ private:
         }
         VideoFrame first; if(!m_decoder.ReadNext(first)){std::wstring e=T(L"error.frame"),cap=T(L"app.title");MessageBoxW(m_hwnd,e.c_str(),cap.c_str(),MB_ICONERROR);Unload();return false;}
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;RenderVideoFrame(first,true);m_currentSec=double(first.timestamp100ns)*1e-7;
-        m_haveNext=m_decoder.ReadNext(m_next);m_audio.Start(path,m_currentSec);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=path;m_droppedFrames=0;m_uiTick=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_lastFrameProcessMs=0.0;
+        m_haveNext=m_decoder.ReadNext(m_next);m_audio.Start(path,m_currentSec,m_selectedAudioStream);m_audio.SetVolume(m_muted?0.0f:m_volume);m_playing=true;m_playStartSec=m_currentSec;m_playStart=Clock::now();m_loaded=true;m_path=path;m_droppedFrames=0;m_uiTick=0;m_seekPending=false;m_seeking=false;m_fpsWindowStart=Clock::now();m_fpsWindowFrames=0;m_submitFps=0.0;m_lastFrameProcessMs=0.0;
+        RebuildMenuBar();
         UpdateTitle();Layout();InvalidateRect(m_hwnd,nullptr,TRUE);return true;
     }
 
     void Unload() {
+        m_subtitles.Clear();m_mediaTracks.Clear();m_selectedAudioStream=-1;m_selectedSubtitleStream=-1;SetSubtitleText(L"");
         m_seekPending=false;m_seeking=false;m_audio.Stop(); m_aiDepthWorker.reset();m_aiDepthLatest={};m_aiDepthSequence=0;m_aiDepthTemporalWorker.Reset(); m_opticalFlow.reset(); if(m_renderer){m_renderer->WaitGPU();m_renderer.reset();} m_decoder.Close();m_guides.Reset();m_haveNext=false;m_next=VideoFrame{};m_loaded=false;m_playing=false;m_currentSec=0;m_lastRenderedTs=-1;m_path.clear();
         if(m_viewport)ShowWindow(m_viewport,SW_HIDE); UpdateTitle(); if(m_hwnd)InvalidateRect(m_hwnd,nullptr,TRUE);
     }
 
     bool RenderVideoFrame(const VideoFrame& f,bool resetGuide) {
+        // Step 04G-4: subtitle lookup is driven by Position() in Tick()/paused PresentCurrent, not synthetic decoder CFR timestamps.
         if(!m_renderer)return false; GuideFrame g;
         // Let NGX/ReShade/RenoDX finish their initial feature capture and delayed
         // recreate before starting the independent CUDA/TensorRT sidecar.
@@ -828,7 +865,7 @@ private:
         m_guides.Reset();m_guideReset=true;m_dlssReset=true;m_lastRenderedTs=-1;
         if(!RenderVideoFrame(f,true)){LOG("Seek frame render failed.");m_playing=false;m_seeking=false;return false;}
         m_currentSec=double(f.timestamp100ns)*1e-7;m_haveNext=m_decoder.ReadNext(m_next);
-        const bool audioOk=m_audio.Start(m_path,m_currentSec);if(audioOk){m_audio.SetVolume(m_muted?0.0f:m_volume);m_audio.Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");
+        const bool audioOk=m_audio.Start(m_path,m_currentSec,m_selectedAudioStream);if(audioOk){m_audio.SetVolume(m_muted?0.0f:m_volume);m_audio.Pause(!resumeAfter);}else LOG("Seek: no audio stream/output; using steady-clock video pacing.");
         m_playStartSec=m_currentSec;m_playStart=Clock::now();m_playing=resumeAfter&&m_haveNext;m_guideReset=false;m_dlssReset=false;m_seeking=false;UpdateTitle();InvalidateRect(m_hwnd,nullptr,FALSE);LOG("Seek complete actual="<<m_currentSec);return true;
     }
 
@@ -838,7 +875,7 @@ private:
 
     void UpdateTitle(){
         if(!m_hwnd)return; if(!m_loaded||!m_renderer){SetWindowTextW(m_hwnd,T(L"app.title").c_str());return;}
-        std::wstringstream s;s<<L"DLSS Video Player V11 | source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())s<<L" decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();s<<L" | "<<QualityNameW(m_activeQuality)<<L" | DLSS "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L" -> "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L" | "<<m_decoder.BackendName()<<L" | NGX "<<(m_renderer->DLSSFeatureCreated()?L"CREATE OK":(m_renderer->DLSSAvailable()?L"READY":L"FALLBACK"))<<L" | "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L" | result 0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec;if(m_opticalFlow)s<<L" | NVOF "<<m_opticalFlow->GridSize()<<L"x "<<m_opticalFlow->GridW()<<L"x"<<m_opticalFlow->GridH();SetWindowTextW(m_hwnd,s.str().c_str());
+        std::wstringstream s;s<<L"DLSS Video Player V11 | source "<<m_decoder.NativeWidth()<<L"x"<<m_decoder.NativeHeight();if(m_decoder.Width()!=m_decoder.NativeWidth()||m_decoder.Height()!=m_decoder.NativeHeight())s<<L" decode "<<m_decoder.Width()<<L"x"<<m_decoder.Height();s<<L" | "<<QualityNameW(m_activeQuality)<<L" | DLSS "<<m_renderer->DLSSInputW()<<L"x"<<m_renderer->DLSSInputH()<<L" -> "<<m_renderer->OutputW()<<L"x"<<m_renderer->OutputH()<<L" | "<<m_decoder.BackendName()<<L" | NGX "<<(m_renderer->DLSSFeatureCreated()?L"CREATE OK":(m_renderer->DLSSAvailable()?L"READY":L"FALLBACK"))<<L" | "<<(m_renderer->DLSSLastEvaluationUsedC()?L"evalC ":L"eval ")<<m_renderer->DLSSEvaluations()<<L" | result 0x"<<std::hex<<uint32_t(m_renderer->DLSSLastResult())<<std::dec;if(m_opticalFlow)s<<L" | NVOF "<<m_opticalFlow->GridSize()<<L"x "<<m_opticalFlow->GridW()<<L"x"<<m_opticalFlow->GridH();if(const auto*at=m_mediaTracks.FindAudio(m_selectedAudioStream))s<<L" | Audio "<<MediaTrackCatalog::ShortLabel(*at);else s<<L" | Audio auto";if(const auto*st=m_mediaTracks.FindSubtitle(m_selectedSubtitleStream)){s<<L" | Subs "<<MediaTrackCatalog::ShortLabel(*st);if(m_subtitles.Loading())s<<L" (loading)";}else s<<L" | Subs Off";SetWindowTextW(m_hwnd,s.str().c_str());
     }
 
     void Layout(){
@@ -859,6 +896,7 @@ private:
         if(m_fill){if(areaAr>ar){rw=areaW;rh=int(std::lround(areaW/ar));}else{rh=areaH;rw=int(std::lround(areaH*ar));}}
         else{if(areaAr>ar){rh=areaH;rw=int(std::lround(areaH*ar));}else{rw=areaW;rh=int(std::lround(areaW/ar));}}
         SetWindowPos(m_renderWnd,nullptr,(areaW-rw)/2,(areaH-rh)/2,std::max(1,rw),std::max(1,rh),SWP_NOZORDER|SWP_NOACTIVATE);
+        if(m_subtitleWnd&&IsWindow(m_subtitleWnd))SetWindowPos(m_subtitleWnd,HWND_TOP,(W-rw)/2,(areaH-rh)/2,std::max(1,rw),std::max(1,rh),SWP_NOACTIVATE);
         InvalidateRect(m_viewport,nullptr,FALSE);UpdateTooltipRects();InvalidateControls();
     }
 
@@ -1013,6 +1051,35 @@ private:
     }
     void ResetSplitDivider(){SetSplitFractionValue(0.5f,true);LOG("[Split Divider] reset 50/50");}
     void NudgeSplitDivider(float delta){SetSplitFractionValue(m_splitFraction+delta,true);LOG("[Split Divider] fraction="<<m_splitFraction);}
+    void RebuildMenuBar(){
+        if(!m_hwnd)return;HMENU old=GetMenu(m_hwnd),fresh=CreateMenuBar();SetMenu(m_hwnd,fresh);DrawMenuBar(m_hwnd);if(old)DestroyMenu(old);
+    }
+    void SetSubtitleText(const std::wstring& text){
+        if(text!=m_subtitleText)m_subtitleText=text;
+        if(m_renderer)m_renderer->SetSubtitleText(m_subtitleText);
+    }
+    void UpdateSubtitleForTime(double seconds){
+        if(m_selectedSubtitleStream<0){m_subtitleClockAnnounced=false;SetSubtitleText(L"");return;}
+        const size_t cueCount=m_subtitles.CueCount();
+        if(cueCount>0&&!m_subtitleClockAnnounced){LOG("[Subtitles Sync] playback clock active t="<<seconds<<"s stream="<<m_selectedSubtitleStream<<" cues="<<cueCount);m_subtitleClockAnnounced=true;}
+        const std::wstring text=m_subtitles.TextAt(seconds);
+        if(text!=m_subtitleText){LOG("[Subtitles Sync] cue "<<(text.empty()?"clear":"hit")<<" t="<<seconds<<"s stream="<<m_selectedSubtitleStream<<" chars="<<text.size()<<" cues="<<cueCount);}
+        SetSubtitleText(text);
+    }
+    void SelectAudioTrack(size_t ordinal){
+        if(ordinal>=m_mediaTracks.AudioTracks().size()||m_path.empty())return;const int next=m_mediaTracks.AudioTracks()[ordinal].streamIndex;if(next==m_selectedAudioStream)return;
+        const int old=m_selectedAudioStream;const double keep=Position();m_selectedAudioStream=next;bool ok=m_audio.Start(m_path,keep,next);if(!ok){LOG("[Tracks] audio switch failed stream="<<next<<"; attempting previous stream="<<old);m_selectedAudioStream=old;ok=m_audio.Start(m_path,keep,old);}if(ok){m_audio.SetVolume(m_muted?0.0f:m_volume);m_audio.Pause(!m_playing);}RebuildMenuBar();UpdateTitle();
+    }
+    void SelectSubtitleOff(){m_selectedSubtitleStream=-1;m_subtitleClockAnnounced=false;m_subtitles.Clear();SetSubtitleText(L"");RebuildMenuBar();UpdateTitle();LOG("[Subtitles] Off");}
+    void SelectSubtitleTrack(size_t ordinal){
+        if(ordinal>=m_mediaTracks.SubtitleTracks().size()||m_path.empty())return;
+        const auto&t=m_mediaTracks.SubtitleTracks()[ordinal];if(!t.textSubtitleSupported)return;
+        m_selectedSubtitleStream=t.streamIndex;m_subtitleClockAnnounced=false;
+        m_subtitles.LoadAsync(m_path,t.streamIndex);
+        SetSubtitleText(L"");
+        RebuildMenuBar();UpdateTitle();
+        LOG("[Subtitles Async] selection requested stream="<<t.streamIndex<<"; video/render thread continues immediately");
+    }
     void ToggleSplitScreen(){
         m_splitScreen=!m_splitScreen;
         if(m_renderer){m_renderer->SetSplitScreen(m_splitScreen);m_renderer->SetSplitFraction(m_splitFraction);if(!m_playing)m_renderer->PresentCurrent();}if(!m_splitScreen&&m_splitDragging)EndSplitDrag();
@@ -1054,6 +1121,9 @@ private:
     }
 
     void HandleCommand(UINT id){
+        if(id>=IDM_AUDIO_TRACK_BASE&&id<IDM_AUDIO_TRACK_BASE+90){SelectAudioTrack(size_t(id-IDM_AUDIO_TRACK_BASE));return;}
+        if(id==IDM_SUBTITLE_OFF){SelectSubtitleOff();return;}
+        if(id>=IDM_SUBTITLE_TRACK_BASE&&id<IDM_SUBTITLE_TRACK_BASE+90){SelectSubtitleTrack(size_t(id-IDM_SUBTITLE_TRACK_BASE));return;}
         const UINT langEnd=IDM_LANG_BASE+static_cast<UINT>(m_languageCodes.size());if(id>=IDM_LANG_BASE && id<langEnd){ApplyLanguage(m_languageCodes[id-IDM_LANG_BASE]);return;}
         switch(id){
         case IDM_SPLIT_SCREEN:ToggleSplitScreen();break;case IDM_SPLIT_RESET:ResetSplitDivider();break;

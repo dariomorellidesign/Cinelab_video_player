@@ -11,11 +11,12 @@ public:
     AudioPlayer() = default;
     ~AudioPlayer();
 
-    bool Start(const std::wstring& videoPath, double seekSeconds = 0.0);
+    bool Start(const std::wstring& videoPath, double seekSeconds = 0.0, int streamIndex = -1);
     bool Seek(double seconds);
     void Pause(bool paused);
     void SetVolume(float volume01);
     float Volume() const { return m_volume; }
+    int StreamIndex() const { return m_streamIndex; }
     void Stop();
     bool Active() const { return m_waveOut != nullptr; }
     bool HasAudioData() const { return m_hasAudioData.load(); }
@@ -39,4 +40,5 @@ private:
     std::atomic<bool> m_hasAudioData{false};
     double m_seekBaseSec = 0.0;
     float m_volume = 1.0f;
+    int m_streamIndex = -1;
 };
