@@ -1,0 +1,37 @@
+diff --git a/Common/NvOFBase/NvOF.cpp b/Common/NvOFBase/NvOF.cpp
+index 36fde6a..e489040 100644
+--- a/Common/NvOFBase/NvOF.cpp
++++ b/Common/NvOFBase/NvOF.cpp
+@@ -159,7 +159,7 @@ void NvOF::Init(uint32_t nOutGridSize, uint32_t nHintGridSize, bool bEnableHints
+     m_initParams.height = m_BufferDesc[NV_OF_BUFFER_USAGE_INPUT].height;
+ 
+     m_initParams.enableExternalHints = bEnableHints ? NV_OF_TRUE : NV_OF_FALSE;
+-    m_initParams.enableOutputCost = NV_OF_FALSE;
++    m_initParams.enableOutputCost = NV_OF_TRUE; // STEP 06A3 always supplies cost buffer
+     m_initParams.hintGridSize = (NV_OF_HINT_VECTOR_GRID_SIZE) m_nHintGridSize;
+     m_initParams.outGridSize = (NV_OF_OUTPUT_VECTOR_GRID_SIZE)m_nOutGridSize;
+     m_initParams.mode = m_ofMode;
+diff --git a/Common/NvOFBase/NvOFD3DCommon.cpp b/Common/NvOFBase/NvOFD3DCommon.cpp
+index 1c5c5c5..21ca390 100644
+--- a/Common/NvOFBase/NvOFD3DCommon.cpp
++++ b/Common/NvOFBase/NvOFD3DCommon.cpp
+@@ -49,6 +49,9 @@ NV_OF_BUFFER_FORMAT DXGIFormatToNvOFBufferFormat(DXGI_FORMAT dxgiFormat)
+     case DXGI_FORMAT_R8_UNORM:
+         ofBufFormat = NV_OF_BUFFER_FORMAT_GRAYSCALE8;
+         break;
++    case DXGI_FORMAT_R8_UINT:
++        ofBufFormat = NV_OF_BUFFER_FORMAT_UINT8; // STEP 06A3 8-bit NVOF cost
++        break;
+     default:
+         ofBufFormat = NV_OF_BUFFER_FORMAT_UNDEFINED;
+     }
+@@ -79,6 +82,9 @@ DXGI_FORMAT NvOFBufferFormatToDxgiFormat(NV_OF_BUFFER_FORMAT  ofBufFormat)
+     case NV_OF_BUFFER_FORMAT_GRAYSCALE8:
+         dxgiFormat = DXGI_FORMAT_R8_UNORM;
+         break;
++    case NV_OF_BUFFER_FORMAT_UINT8:
++        dxgiFormat = DXGI_FORMAT_R8_UINT; // STEP 06A3 8-bit NVOF cost
++        break;
+     default:
+         dxgiFormat = DXGI_FORMAT_UNKNOWN;
+     }

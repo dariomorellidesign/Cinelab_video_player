@@ -82,6 +82,7 @@ public:
             return false;
         }
         m_initialized = true;
+        m_deviceHooked = false;
         m_featureReady = false;
         m_configured = false;
         m_modeApplied = false;
@@ -101,6 +102,7 @@ public:
             LOG("[DLSS-G] slShutdown result=" << static_cast<int>(result));
         }
         m_initialized = false;
+        m_deviceHooked = false;
         m_featureReady = false;
         m_configured = false;
         m_modeApplied = false;
@@ -149,9 +151,15 @@ public:
 
     ID3D12Device* UpgradeDeviceForQueue(ID3D12Device* nativeDevice) {
         if (!nativeDevice || !InitializeProcess()) return nativeDevice;
+        m_deviceHooked = false;
         const sl::Result setDevice = m_setD3DDevice(nativeDevice);
         if (setDevice != sl::Result::eOk) {
             LOG("[DLSS-G] slSetD3DDevice failed result=" << static_cast<int>(setDevice));
+            // Step06A4D: never hook DXGI with a native queue after device setup failed.
+            // No proxies have been made for this attempt, so tear down the failed
+            // session before the renderer takes its normal native-D3D12 fallback.
+            ShutdownProcess();
+            LOG("[DLSS-G] device setup aborted; native D3D12 fallback for this renderer");
             return nativeDevice;
         }
         IUnknown* deviceIdentity = nullptr;
@@ -166,12 +174,13 @@ public:
             LOG("[DLSS-G] device upgrade failed result=" << static_cast<int>(upgraded));
             return nativeDevice;
         }
+        m_deviceHooked = true;
         LOG("[DLSS-G] D3D12 device hook ready for CreateCommandQueue");
         return static_cast<ID3D12Device*>(base);
     }
 
     IDXGIFactory6* UpgradeFactoryForSwapchain(IDXGIFactory6* nativeFactory) {
-        if (!nativeFactory || !m_initialized || !m_upgradeInterface) return nativeFactory;
+        if (!nativeFactory || !m_initialized || !m_deviceHooked || !m_upgradeInterface) return nativeFactory;
         void* base = nativeFactory;
         const sl::Result upgraded = m_upgradeInterface(&base);
         if (upgraded != sl::Result::eOk || !base) {
@@ -184,7 +193,7 @@ public:
 
     void OnSwapchainCreated(IDXGISwapChain3* swapchain) {
         m_featureReady = false;
-        if (!m_initialized || !swapchain || !m_isFeatureLoaded || !m_getFeatureFunction) return;
+        if (!m_initialized || !m_deviceHooked || !swapchain || !m_isFeatureLoaded || !m_getFeatureFunction) return;
 
         // Required by DLSS-G and also proves GetCurrentBackBufferIndex is routed through the proxy.
         (void)swapchain->GetCurrentBackBufferIndex();
@@ -393,6 +402,10 @@ public:
     }
 
 private:
+#ifdef DMP_TESTING
+    friend struct DLSSFrameGenerationRuntimeTestAccess;
+#endif
+    bool m_deviceHooked = false;
     DLSSFrameGenerationRuntime() = default;
     DLSSFrameGenerationRuntime(const DLSSFrameGenerationRuntime&) = delete;
     DLSSFrameGenerationRuntime& operator=(const DLSSFrameGenerationRuntime&) = delete;

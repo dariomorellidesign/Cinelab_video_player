@@ -17,15 +17,31 @@ struct OpticalFlowFrame {
     bool valid = false;
 };
 
+// Borrowed resources owned by OpticalFlowEngine. Renderer must signal completion before reuse.
+struct GpuOpticalFlowFrame {
+    // Both NVOF inputs and its compact output remain owned by OpticalFlowEngine.
+    // The renderer only borrows them until it signals the supplied completion fence.
+    ID3D12Resource* color = nullptr;          // current input frame
+    ID3D12Resource* previousColor = nullptr;  // previous input frame, paired with motion
+    ID3D12Resource* motion = nullptr;
+    ID3D12Resource* cost = nullptr;           // NVOF R8_UINT: larger value means less confidence
+    ID3D12Fence* readyFence = nullptr;
+    uint64_t readyValue = 0;
+    uint32_t gridW=0,gridH=0,sourceW=0,sourceH=0;
+    bool valid=false;
+};
+
 struct OpticalFlowStats {
     uint64_t calls = 0;
     uint64_t pairs = 0;
+    double lastPreprocessMs = 0.0; // STEP 06A1 CPU-only private NVOF input transform
     double lastUploadMs = 0.0;
     double lastExecuteMs = 0.0;
     double lastDownloadMs = 0.0;
     double lastConvertMs = 0.0;
     double lastStabilizeMs = 0.0;
     double lastTotalMs = 0.0;
+    double emaPreprocessMs = 0.0;
     double emaUploadMs = 0.0;
     double emaExecuteMs = 0.0;
     double emaDownloadMs = 0.0;
@@ -60,6 +76,8 @@ public:
 
     bool Generate(const uint8_t* bgra, size_t bytes, bool reset,
                   OpticalFlowFrame& out);
+
+    bool GenerateGpu(const uint8_t* bgra, size_t bytes, bool reset, ID3D12Fence* consumedFence, uint64_t consumedValue, GpuOpticalFlowFrame& out);
 
     bool Available() const;
     uint32_t GridSize() const;

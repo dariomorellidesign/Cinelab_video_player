@@ -139,8 +139,18 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
                              NVSDK_NGX_DLSS_Hint_Render_Preset_K);
     NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance,
                              NVSDK_NGX_DLSS_Hint_Render_Preset_K);
-    NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,
-                             NVSDK_NGX_DLSS_Hint_Render_Preset_K);
+    // L is the validated player default: it preserves DLAA detail without the
+    // pronounced temporal trails observed with K on decoded film material.
+    // J and K remain explicit process-level diagnostics only.
+    char dlaaPresetEnv[8]{};
+    const DWORD dlaaPresetEnvLen=GetEnvironmentVariableA("DMP_DLSS_DLAA_PRESET",dlaaPresetEnv,static_cast<DWORD>(sizeof(dlaaPresetEnv)));
+    const int dlaaPreset=(dlaaPresetEnvLen&&(_stricmp(dlaaPresetEnv,"J")==0))
+        ? NVSDK_NGX_DLSS_Hint_Render_Preset_J
+        : (dlaaPresetEnvLen&&(_stricmp(dlaaPresetEnv,"K")==0))
+            ? NVSDK_NGX_DLSS_Hint_Render_Preset_K
+            : NVSDK_NGX_DLSS_Hint_Render_Preset_L;
+    NVSDK_NGX_Parameter_SetI(m_params, NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA,dlaaPreset);
+    LOG("DLSS DLAA preset="<<(dlaaPreset==NVSDK_NGX_DLSS_Hint_Render_Preset_J?"J (lower ghosting diagnostic)":(dlaaPreset==NVSDK_NGX_DLSS_Hint_Render_Preset_K?"K (legacy diagnostic)":"L (validated player default)")));
 
     // Feature creation is deliberately deferred until the first rendered frame.
     // At that point D3D12/DXGI and ReShade add-ons are fully initialized, so a

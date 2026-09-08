@@ -18,7 +18,7 @@ public:
                const std::vector<float>& depth,
                uint32_t width, uint32_t height,
                bool history,
-               std::vector<float>& outMask);
+               std::vector<float>& outMask, bool constantDepth = false);
     const SoftTemporalMaskStats& Stats() const { return m_stats; }
 
 private:

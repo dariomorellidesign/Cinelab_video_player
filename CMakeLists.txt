@@ -54,6 +54,7 @@ add_executable(DLSSVideoPlayer WIN32
     src/TemporalGuides.h
     src/OpticalFlowEngine.cpp
     src/OpticalFlowEngine.h
+    src/NvofConfidenceRepair.h
     src/AudioPlayer.cpp
     src/AudioPlayer.h
     src/Log.h

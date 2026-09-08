@@ -41,3 +41,6 @@ ReShade.log
 *.suo
 Thumbs.db
 .DS_Store
+
+# Release staging (ZIP assets are generated locally or by GitHub Actions)
+/dist/

@@ -7,11 +7,15 @@
 #include <string>
 #include <vector>
 #include "DLSSBackend.h"
+#include "CameraMotionGpu.h"
+
+struct GpuOpticalFlowFrame;
 
 class D3D12Renderer {
 public:
     enum class DebugView { Final, Input, MotionVectors, Depth, BiasMask, AIDepth, AIHardwareDepth };
     enum class DepthSource { Legacy, Flat, AISynthetic };
+    enum class BiasMaskMode { Auto, Off, ForceCurrent };
 
     void SetDepthSource(DepthSource source) { m_depthSource = source; }
     DepthSource GetDepthSource() const { return m_depthSource; }
@@ -36,7 +40,7 @@ public:
                      uint32_t gridW, uint32_t gridH,
                      bool temporalReset, float frameTimeMs,
                      const float* aiDepthPreview01, size_t aiDepthBytes,
-                     uint32_t aiDepthW, uint32_t aiDepthH);
+                     uint32_t aiDepthW, uint32_t aiDepthH, const GpuOpticalFlowFrame* gpuFlow = nullptr);
 
     void SetDLSS(bool enabled) { m_dlssEnabled = enabled; }
     bool DLSSAvailable() const { return m_dlss.Available(); }
@@ -49,6 +53,9 @@ public:
     ID3D12Device* Device() const { return m_device.Get(); }
     void SetDebugView(DebugView v) { m_debugView = v; }
     DebugView GetDebugView() const { return m_debugView; }
+    BiasMaskMode CycleBiasMaskMode() { m_biasMaskMode=static_cast<BiasMaskMode>((static_cast<int>(m_biasMaskMode)+1)%3); return m_biasMaskMode; }
+    void SetBiasMaskMode(BiasMaskMode mode) { m_biasMaskMode=mode; }
+    const wchar_t* BiasMaskModeName() const { return m_biasMaskMode==BiasMaskMode::Auto?L"AUTO":(m_biasMaskMode==BiasMaskMode::Off?L"OFF":L"FORCE CURRENT"); }
     void SetSplitScreen(bool enabled) { m_splitScreen = enabled; }
     void SetVSync(bool enabled) { m_vsyncEnabled = enabled; }
     bool VSyncEnabled() const { return m_vsyncEnabled; }
@@ -70,6 +77,8 @@ public:
     uint64_t DLSSEvaluations() const { return m_dlss.EvaluationCount(); }
     bool DLSSLastEvaluationUsedC() const { return m_dlss.LastEvaluationUsedC(); }
     NVSDK_NGX_Result DLSSLastResult() const { return m_dlss.LastResult(); }
+    ID3D12Fence* CompletionFence() const { return m_fence.Get(); }
+    uint64_t CompletionValue() const { return m_fenceValue; }
     void WaitGPU();
     bool PresentCurrent();
     void SetColorSettings(const ColorSettings& settings) { m_colorSettings = settings; }
@@ -135,6 +144,7 @@ private:
     uint64_t m_fenceValue = 0;
     uint64_t m_frameFence[FrameCount]{};
     uint32_t m_frameSlot = 0;
+    float m_motionDebugDeadZone = 0.20f;
 
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_rtvHeap;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> m_srvHeap;
@@ -152,6 +162,13 @@ private:
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoDepthWrite;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoAIHardwareDepthWrite;
     Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoExpandGuides;
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> m_psoRawMotion;
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_rawRootSig;
+    CameraMotionGpu m_cameraMotion;
+    Microsoft::WRL::ComPtr<ID3D12QueryHeap> m_motionQueries;
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_motionTimes;
+    uint64_t m_motionFrequency=0;
+    bool m_motionTimesReady[FrameCount]{};
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_decodedTexture;
     Microsoft::WRL::ComPtr<ID3D12Resource> m_upload[FrameCount];
@@ -225,6 +242,7 @@ private:
     uint64_t m_frameGenerationDisplayedFramesTotal = 0;
     uint32_t m_frameGenerationMultiplier = 2;
     DebugView m_debugView = DebugView::Final;
+    BiasMaskMode m_biasMaskMode = BiasMaskMode::Off;
     ColorSettings m_colorSettings{};
     bool m_lastDLSSUsed = false;
     bool m_splitScreen = false;

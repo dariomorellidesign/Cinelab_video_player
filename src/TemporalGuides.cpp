@@ -377,34 +377,29 @@ bool TemporalGuideGenerator::Generate(const uint8_t* bgra, uint32_t sourceW, uin
     }
     if (hardCut) out.sceneCutDetected = true;
     std::vector<float> depthGrid;
-    BuildDepthProxy(cur, fx, fy, gw, gh, depthGrid);
+    // Only the selected producer runs. Flat is the no-depth-computation baseline.
+    if (m_depthMode == DepthMode::Estimated) BuildDepthProxy(cur, fx, fy, gw, gh, depthGrid);
+    else depthGrid.assign(size_t(gw) * gh, 0.75f);
 
-    // Build the OLD mask at the OLD analysis resolution. In Step 02A we only
-    // replace the motion source, then upsample this baseline mask/depth to the
-    // higher output guide grid so the comparison remains controlled.
-    // Step 04E-1 AI depth-guided temporal mask. Guide B remains the legacy depth proxy;
-    // only the internal structural depth signal used by the SOFT MASK is replaced by
-    // stabilized AI relative depth when a sufficiently fresh asynchronous frame exists.
-    // The mask uses |depth differences|, so near/far polarity does not matter here.
+    // Mask and Guide B follow the selected source. AI input is one immutable snapshot.
     std::vector<float> maskDepthGuide = depthGrid;
     out.maskAIDepthAvailable = externalMaskDepth && externalMaskDepth->depth01 &&
         externalMaskDepth->width && externalMaskDepth->height;
     out.maskDepthAgeMs = out.maskAIDepthAvailable ? externalMaskDepth->ageMs : -1.0f;
     out.maskDepthAgeFrames = out.maskAIDepthAvailable ? externalMaskDepth->ageFrames : -1.0f;
-    const char* maskDepthPolicy = std::getenv("DMP_MASK_DEPTH");
-    const bool forceLegacyMaskDepth = maskDepthPolicy &&
-        (std::strcmp(maskDepthPolicy,"legacy")==0 || std::strcmp(maskDepthPolicy,"LEGACY")==0 ||
-         std::strcmp(maskDepthPolicy,"proxy")==0 || std::strcmp(maskDepthPolicy,"0")==0);
-    if (!forceLegacyMaskDepth && out.maskAIDepthAvailable && externalMaskDepth->valid) {
+    if (m_depthMode == DepthMode::AI && !hardCut && out.maskAIDepthAvailable && externalMaskDepth->valid) {
         std::vector<float> aiDepthOnAnalysisGrid;
         if (ResampleMaskDepthGuide01(externalMaskDepth->depth01, externalMaskDepth->width,
                                      externalMaskDepth->height, gw, gh, aiDepthOnAnalysisGrid)) {
+            // The same conventional depth signal also occupies Guide B.
+            for (auto& z : aiDepthOnAnalysisGrid) z = 1.0f - z;
+            depthGrid = aiDepthOnAnalysisGrid;
             maskDepthGuide = std::move(aiDepthOnAnalysisGrid);
             out.maskUsedAIDepth = true;
         }
     }
     std::vector<float> maskGrid;
-    m_softMask.Build(cur, fx, fy, mismatch, maskDepthGuide, gw, gh, history, maskGrid);
+    m_softMask.Build(cur, fx, fy, mismatch, maskDepthGuide, gw, gh, history, maskGrid, m_depthMode!=DepthMode::Estimated && !out.maskUsedAIDepth);
     const uint32_t outGW = m_outputGridW ? m_outputGridW : gw;
     const uint32_t outGH = m_outputGridH ? m_outputGridH : gh;
     if (!outGW || !outGH) return false;

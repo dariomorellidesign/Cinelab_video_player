@@ -1,5 +1,7 @@
 #include "OpticalFlowEngine.h"
 #include "FilmMotionStabilizer.h"
+#include <cmath>
+#include "NvofConfidenceRepair.h"
 
 #include <windows.h>
 #include <wrl/client.h>
@@ -97,6 +99,39 @@ bool ResolveFilmStabilization(std::string& modeName) {
     return true;
 }
 
+// STEP 06A1 NVOF analysis-only contrast prefilter.
+// This transform exists only on the private CPU copy uploaded to NVOFA. The decoded frame,
+// DLSS color input, RenoDX/NR input, subtitles, depth and temporal-mask color remain untouched.
+struct AnalysisContrastChoice {
+    const char* name = "OFF";
+    double gamma = 1.0;
+};
+
+AnalysisContrastChoice ResolveAnalysisContrast() {
+    const std::string requested = LowerAscii(ReadEnvAscii("DMP_NVOF_ANALYSIS_CONTRAST"));
+    if (requested == "mild" || requested == "1") return {"MILD", 1.12};
+    if (requested == "medium" || requested == "2") return {"MEDIUM", 1.50}; // STEP 06A2 previous Strong
+    if (requested == "strong" || requested == "3") return {"STRONG", 2.40}; // STEP 06A2 extreme
+    if (requested.empty() || requested == "off" || requested == "0" || requested == "raw") return {"OFF", 1.0};
+    return {"OFF_INVALID_FALLBACK", 1.0};
+}
+// STEP 06A2 shadow-noise-aware NVOF preprocessing.
+// The filter is 3x3, edge-aware and luminance-only. It runs only in deep shadows and only
+// on the private NVOF analysis copy, before the Step06A1 contrast LUT.
+struct ShadowFilterChoice {
+    const char* name = "OFF";
+    int lumaThreshold = 0;
+    int edgeDelta = 0;
+    double blend = 0.0;
+};
+
+ShadowFilterChoice ResolveShadowFilter() {
+    const std::string requested = LowerAscii(ReadEnvAscii("DMP_NVOF_SHADOW_FILTER"));
+    if (requested == "low" || requested == "1") return {"LOW", 42, 10, 0.35};
+    if (requested == "medium" || requested == "2") return {"MEDIUM", 58, 14, 0.55};
+    if (requested.empty() || requested == "off" || requested == "0" || requested == "raw") return {"OFF", 0, 0, 0.0};
+    return {"OFF_INVALID_FALLBACK", 0, 0, 0.0};
+}
 uint32_t ResolveGridChoice(uint32_t preferredGrid, uint32_t width, uint32_t height,
                            std::string& policyName) {
     // Step 04B-5 AUTO grid policy: keep the validated 2x2 path for normal video,
@@ -132,17 +167,30 @@ struct OpticalFlowEngine::Impl {
     std::string filmModeName = "AUTO_FILM_GRAIN";
     bool filmStabilizationEnabled = true;
     FilmMotionStabilizer filmStabilizer;
+    std::string analysisContrastName = "OFF";
+    double analysisContrastGamma = 1.0;
+    std::vector<uint8_t> analysisContrastLut;
+    std::vector<uint8_t> analysisScratch;
+    std::string shadowFilterName = "OFF";
+    int shadowFilterLumaThreshold = 0;
+    int shadowFilterEdgeDelta = 0;
+    double shadowFilterBlend = 0.0;
+    std::vector<uint8_t> analysisLuma;
 
     NvOFObj flow;
     std::vector<ComPtr<ID3D12Resource>> inputResources;
     ComPtr<ID3D12Resource> outputResource;
     std::vector<NvOFBufferObj> inputBuffers;
     NvOFBufferObj outputBuffer;
+    ComPtr<ID3D12Resource> costResource;
+    NvOFBufferObj costBuffer;
 
     NV_OF_FENCE_POINT appFence{};
     NV_OF_FENCE_POINT ofaFence{};
 
     std::vector<NV_OF_FLOW_VECTOR> hostFlow;
+    std::vector<uint32_t> hostCostStorage;
+    NvofConfidenceRepair confidenceRepair;
     uint32_t previousIndex = 0;
     bool havePrevious = false;
     bool disableHintsOnNextPair = true;
@@ -154,6 +202,8 @@ struct OpticalFlowEngine::Impl {
 
     void Shutdown() {
         // Buffers must unregister while the NvOF session/fences are still alive.
+        costBuffer.reset();
+        costResource.Reset();
         outputBuffer.reset();
         inputBuffers.clear();
         outputResource.Reset();
@@ -162,12 +212,23 @@ struct OpticalFlowEngine::Impl {
         ReleaseFencePoint(appFence);
         ReleaseFencePoint(ofaFence);
         hostFlow.clear();
+        hostCostStorage.clear();
+        confidenceRepair.Reset();
+        analysisContrastLut.clear();
+        analysisScratch.clear();
+        analysisLuma.clear();
         filmStabilizer.Reset();
         havePrevious = false;
         device = nullptr;
         width = height = gridSize = gridW = gridH = 0;
         perfName = "SLOW";
         filmModeName = "AUTO_FILM_GRAIN";
+        analysisContrastName = "OFF";
+        analysisContrastGamma = 1.0;
+        shadowFilterName = "OFF";
+        shadowFilterLumaThreshold = 0;
+        shadowFilterEdgeDelta = 0;
+        shadowFilterBlend = 0.0;
         filmStabilizationEnabled = true;
         stats = {};
     }
@@ -179,11 +240,87 @@ struct OpticalFlowEngine::Impl {
         filmStabilizer.Reset();
     }
 
-    void UpdatePairStats(double uploadMs, double executeMs, double downloadMs,
+    const uint8_t* PrepareAnalysisInput(const uint8_t* bgra, size_t bytes, double& preprocessMs) {
+        preprocessMs = 0.0;
+        const size_t pixelCount = size_t(width) * height;
+        const size_t expected = pixelCount * 4u;
+        if (!bgra || bytes < expected) return bgra;
+        const bool contrastActive = analysisContrastGamma > 1.000001 && analysisContrastLut.size() == 256u;
+        const bool shadowActive = shadowFilterBlend > 0.000001 && shadowFilterLumaThreshold > 0 && shadowFilterEdgeDelta > 0;
+        // Exact baseline bypass: no copy, no LUT, no shadow pass and the original pointer.
+        if (!contrastActive && !shadowActive) return bgra;
+
+        const auto start = OfClock::now();
+        analysisScratch.resize(expected);
+        if (shadowActive) {
+            analysisLuma.resize(pixelCount);
+            for (size_t p = 0; p < pixelCount; ++p) {
+                const size_t i = p * 4u;
+                // Integer BT.709-style luma from BGRA. We filter this scalar only.
+                analysisLuma[p] = static_cast<uint8_t>((19u * bgra[i + 0u] + 183u * bgra[i + 1u] + 54u * bgra[i + 2u] + 128u) >> 8u);
+            }
+        }
+
+        for (uint32_t y = 0; y < height; ++y) {
+            for (uint32_t x = 0; x < width; ++x) {
+                const size_t p = size_t(y) * width + x;
+                const size_t i = p * 4u;
+                int workingB = bgra[i + 0u];
+                int workingG = bgra[i + 1u];
+                int workingR = bgra[i + 2u];
+
+                if (shadowActive && x > 0u && y > 0u && x + 1u < width && y + 1u < height) {
+                    const int centerLuma = analysisLuma[p];
+                    if (centerLuma <= shadowFilterLumaThreshold) {
+                        int lumaSum = centerLuma;
+                        int accepted = 1;
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                if (dx == 0 && dy == 0) continue;
+                                const size_t np = size_t(int(y) + dy) * width + size_t(int(x) + dx);
+                                const int neighborLuma = analysisLuma[np];
+                                if (neighborLuma > shadowFilterLumaThreshold + shadowFilterEdgeDelta) continue;
+                                if (std::abs(neighborLuma - centerLuma) > shadowFilterEdgeDelta) continue;
+                                lumaSum += neighborLuma;
+                                ++accepted;
+                            }
+                        }
+                        if (accepted >= 3) {
+                            const double averageLuma = double(lumaSum) / double(accepted);
+                            const int filteredLuma = std::clamp(int(std::lround(double(centerLuma) * (1.0 - shadowFilterBlend) + averageLuma * shadowFilterBlend)), 0, 255);
+                            // Add the same delta to B/G/R: only luminance is smoothed; local chroma offsets are retained.
+                            const int delta = filteredLuma - centerLuma;
+                            workingB = std::clamp(workingB + delta, 0, 255);
+                            workingG = std::clamp(workingG + delta, 0, 255);
+                            workingR = std::clamp(workingR + delta, 0, 255);
+                        }
+                    }
+                }
+
+                analysisScratch[i + 0u] = contrastActive ? analysisContrastLut[size_t(workingB)] : static_cast<uint8_t>(workingB);
+                analysisScratch[i + 1u] = contrastActive ? analysisContrastLut[size_t(workingG)] : static_cast<uint8_t>(workingG);
+                analysisScratch[i + 2u] = contrastActive ? analysisContrastLut[size_t(workingR)] : static_cast<uint8_t>(workingR);
+                analysisScratch[i + 3u] = bgra[i + 3u];
+            }
+        }
+        preprocessMs = MsBetween(start, OfClock::now());
+        return analysisScratch.data();
+    }
+
+    // STEP 06A4D: exact Step06A3 policy, parallel classification and S10.5 histogram medians.
+    using ConfidenceRepairStats = NvofConfidenceRepair::Stats;
+    ConfidenceRepairStats RepairLowConfidenceMotion(std::vector<float>& motionXY, const uint8_t* bgra) {
+        const size_t cells=size_t(gridW)*gridH;
+        if(hostCostStorage.size()*sizeof(uint32_t)<cells) return {};
+        return confidenceRepair.Run(motionXY,bgra,
+            reinterpret_cast<const uint8_t*>(hostCostStorage.data()),width,height,gridSize);
+    }
+    void UpdatePairStats(double preprocessMs, double uploadMs, double executeMs, double downloadMs,
                          double convertMs, double stabilizeMs, double totalMs,
                          const FilmMotionStabilizationStats& filmStats) {
         ++stats.calls;
         ++stats.pairs;
+        stats.lastPreprocessMs = preprocessMs;
         stats.lastUploadMs = uploadMs;
         stats.lastExecuteMs = executeMs;
         stats.lastDownloadMs = downloadMs;
@@ -201,6 +338,7 @@ struct OpticalFlowEngine::Impl {
         stats.filmCenterMotionY = filmStats.centerMotionY;
         const double a = 0.10;
         if (stats.pairs == 1u) {
+            stats.emaPreprocessMs = preprocessMs;
             stats.emaUploadMs = uploadMs;
             stats.emaExecuteMs = executeMs;
             stats.emaDownloadMs = downloadMs;
@@ -208,6 +346,7 @@ struct OpticalFlowEngine::Impl {
             stats.emaStabilizeMs = stabilizeMs;
             stats.emaTotalMs = totalMs;
         } else {
+            stats.emaPreprocessMs = stats.emaPreprocessMs * (1.0 - a) + preprocessMs * a;
             stats.emaUploadMs = stats.emaUploadMs * (1.0 - a) + uploadMs * a;
             stats.emaExecuteMs = stats.emaExecuteMs * (1.0 - a) + executeMs * a;
             stats.emaDownloadMs = stats.emaDownloadMs * (1.0 - a) + downloadMs * a;
@@ -217,9 +356,10 @@ struct OpticalFlowEngine::Impl {
         }
 
         if (stats.pairs <= 3u || (stats.pairs % 60u) == 0u) {
-            LOG("[NVOF Perf] mode=" << perfName
+            LOG("[NVOF Perf] mode=" << perfName << " analysisContrast=" << analysisContrastName << " shadowFilter=" << shadowFilterName
                 << " grid=" << gridSize
                 << " pair=" << stats.pairs
+                << " preprocessMs=" << preprocessMs << " emaPreprocessMs=" << stats.emaPreprocessMs
                 << " uploadMs=" << uploadMs
                 << " executeMs=" << executeMs
                 << " downloadMs=" << downloadMs
@@ -251,6 +391,27 @@ struct OpticalFlowEngine::Impl {
         const PerfChoice perf = ResolvePerfChoice();
         perfName = perf.name;
         filmStabilizationEnabled = ResolveFilmStabilization(filmModeName);
+        const AnalysisContrastChoice analysisContrast = ResolveAnalysisContrast();
+        analysisContrastName = analysisContrast.name;
+        analysisContrastGamma = analysisContrast.gamma;
+        const ShadowFilterChoice shadowFilter = ResolveShadowFilter();
+        shadowFilterName = shadowFilter.name;
+        shadowFilterLumaThreshold = shadowFilter.lumaThreshold;
+        shadowFilterEdgeDelta = shadowFilter.edgeDelta;
+        shadowFilterBlend = shadowFilter.blend;
+        analysisContrastLut.resize(256u);
+        for (size_t i = 0; i < analysisContrastLut.size(); ++i) {
+            const double x = double(i) / 255.0;
+            double y = x;
+            if (analysisContrastGamma > 1.000001) {
+                y = x <= 0.5
+                    ? 0.5 * std::pow(2.0 * x, analysisContrastGamma)
+                    : 1.0 - 0.5 * std::pow(2.0 * (1.0 - x), analysisContrastGamma);
+            }
+            analysisContrastLut[i] = static_cast<uint8_t>(std::clamp(int(std::lround(y * 255.0)), 0, 255));
+        }
+        analysisScratch.clear();
+        analysisLuma.clear();
         std::string gridPolicy;
         const uint32_t requestedGrid = ResolveGridChoice(std::max(1u, preferredGrid), width, height, gridPolicy);
 
@@ -305,7 +466,18 @@ struct OpticalFlowEngine::Impl {
         outputBuffer = flow->RegisterPreAllocBuffers(
             outputDesc, outputResource.Get(), &appFence, &ofaFence);
 
+        NV_OF_BUFFER_DESCRIPTOR costDesc{};
+        costDesc.width = gridW;
+        costDesc.height = gridH;
+        costDesc.bufferUsage = NV_OF_BUFFER_USAGE_COST;
+        costDesc.bufferFormat = NV_OF_BUFFER_FORMAT_UINT8;
+        costResource = AllocateTexture(device, costDesc);
+        ++ofaFence.value;
+        costBuffer = flow->RegisterPreAllocBuffers(
+            costDesc, costResource.Get(), &appFence, &ofaFence);
+
         hostFlow.resize(size_t(gridW) * gridH);
+        hostCostStorage.resize((size_t(gridW) * gridH + sizeof(uint32_t) - 1u) / sizeof(uint32_t));
         ResetHistory();
 
         LOG("[NVOF] Initialized D3D12: input=" << width << "x" << height
@@ -315,7 +487,38 @@ struct OpticalFlowEngine::Impl {
             << " output=" << gridW << "x" << gridH
             << " perf=" << perfName
             << " filmStabilize=" << filmModeName
+            << " analysisContrast=" << analysisContrastName << " contrastGamma=" << analysisContrastGamma
+            << " shadowFilter=" << shadowFilterName << " shadowLumaThreshold=" << shadowFilterLumaThreshold << " shadowEdgeDelta=" << shadowFilterEdgeDelta << " shadowBlend=" << shadowFilterBlend
             << " envPerf=" << (ReadEnvAscii("DMP_NVOF_PERF").empty() ? "default" : ReadEnvAscii("DMP_NVOF_PERF")));
+        return true;
+    }
+
+    bool GenerateGpu(const uint8_t* bgra,size_t bytes,bool reset,ID3D12Fence* consumedFence,uint64_t consumedValue,GpuOpticalFlowFrame& out){
+        out={};if(!flow||!bgra||bytes<size_t(width)*height*4u)return false;
+        if(reset)ResetHistory();
+        const auto start=OfClock::now();
+        const uint32_t current=havePrevious?1u-previousIndex:0u;
+        // SDK staging reuse waits for the last renderer consumer. No readback is performed.
+        NV_OF_FENCE_POINT consumed{};consumed.fence=consumedFence;consumed.value=consumedValue;
+        auto* waitPoint=consumedFence&&consumedValue?&consumed:&ofaFence;
+        ++appFence.value;inputBuffers[current]->UploadData(bgra,waitPoint,&appFence);
+        const auto uploaded=OfClock::now();
+        const bool pair=havePrevious;
+        if(pair){
+            ++ofaFence.value;
+            flow->Execute(inputBuffers[current].get(),inputBuffers[previousIndex].get(),outputBuffer.get(),nullptr,costBuffer.get(),0,nullptr,&appFence,1,&ofaFence,disableHintsOnNextPair?NV_OF_TRUE:NV_OF_FALSE);
+            disableHintsOnNextPair=false;
+        }
+        out.color=inputResources[current].Get();
+        out.previousColor=pair?inputResources[previousIndex].Get():inputResources[current].Get();
+        previousIndex=current;havePrevious=true;
+        out.motion=outputResource.Get();out.cost=costResource.Get();
+        out.readyFence=pair?ofaFence.fence:appFence.fence;out.readyValue=pair?ofaFence.value:appFence.value;
+        out.gridW=gridW;out.gridH=gridH;out.sourceW=width;out.sourceH=height;out.valid=pair;
+        filmStabilizationEnabled=false;filmModeName="OFF_GPU_RAW";analysisContrastName="OFF_GPU_RAW";shadowFilterName="OFF_GPU_RAW";
+        FilmMotionStabilizationStats noFilters{};
+        UpdatePairStats(0,MsBetween(start,uploaded),MsBetween(uploaded,OfClock::now()),0,0,0,MsBetween(start,OfClock::now()),noFilters);
+        if(stats.calls<=3u||stats.calls%120u==0u)LOG("[GPU MV] raw=1 rendererResolve=LOCAL_PLUS_CAMERA sceneCut=SPARSE_DECODER confidenceCPU=OFF filmFilter=OFF depth=CONSTANT mask=GPU_DISOCCLUSION uploadBytes="<<size_t(width)*height*4u<<" readbackBytes=0 guideUploadBytes=0 pair="<<pair<<" grid="<<gridW<<"x"<<gridH);
         return true;
     }
 
@@ -326,16 +529,20 @@ struct OpticalFlowEngine::Impl {
         if (reset) ResetHistory();
 
         const auto totalStart = OfClock::now();
+        double preprocessMs = 0.0;
+        const uint8_t* analysisInput = PrepareAnalysisInput(bgra, bytes, preprocessMs);
 
         if (!havePrevious) {
             previousIndex = 0;
             const auto uploadStart = OfClock::now();
             ++appFence.value;
-            inputBuffers[previousIndex]->UploadData(bgra, &ofaFence, &appFence);
+            inputBuffers[previousIndex]->UploadData(analysisInput, &ofaFence, &appFence);
             const auto uploadEnd = OfClock::now();
             havePrevious = true;
             ++stats.calls;
+            stats.lastPreprocessMs = preprocessMs;
             stats.lastUploadMs = MsBetween(uploadStart, uploadEnd);
+            stats.emaPreprocessMs = preprocessMs;
             stats.lastExecuteMs = 0.0;
             stats.lastDownloadMs = 0.0;
             stats.lastConvertMs = 0.0;
@@ -348,7 +555,7 @@ struct OpticalFlowEngine::Impl {
         const uint32_t currentIndex = 1u - previousIndex;
         const auto uploadStart = OfClock::now();
         ++appFence.value;
-        inputBuffers[currentIndex]->UploadData(bgra, &ofaFence, &appFence);
+        inputBuffers[currentIndex]->UploadData(analysisInput, &ofaFence, &appFence);
         const auto uploadEnd = OfClock::now();
 
         const auto executeStart = uploadEnd;
@@ -356,13 +563,14 @@ struct OpticalFlowEngine::Impl {
         flow->Execute(inputBuffers[currentIndex].get(),
                       inputBuffers[previousIndex].get(),
                       outputBuffer.get(),
-                      nullptr, nullptr, 0, nullptr,
+                      nullptr, costBuffer.get(), 0, nullptr,
                       &appFence, 1, &ofaFence,
                       disableHintsOnNextPair ? NV_OF_TRUE : NV_OF_FALSE);
         const auto executeEnd = OfClock::now();
 
         const auto downloadStart = executeEnd;
         outputBuffer->DownloadData(hostFlow.data(), &ofaFence);
+        costBuffer->DownloadData(hostCostStorage.data(), &ofaFence);
         const auto downloadEnd = OfClock::now();
         disableHintsOnNextPair = false;
         previousIndex = currentIndex;
@@ -375,6 +583,19 @@ struct OpticalFlowEngine::Impl {
             out.motionXY[i * 2u + 1u] = float(hostFlow[i].flowy) / 32.0f;
         }
         const auto convertEnd = OfClock::now();
+        const auto confidenceStart = convertEnd;
+        const ConfidenceRepairStats confidenceStats = RepairLowConfidenceMotion(out.motionXY, bgra);
+        const auto confidenceEnd = OfClock::now();
+        const double confidenceMs = MsBetween(confidenceStart, confidenceEnd);
+        const uint64_t confidencePair = stats.pairs + 1u;
+        if (confidencePair <= 3u || (confidencePair % 60u) == 0u) {
+            LOG("[NVOF Confidence] pair=" << confidencePair
+                << " q25=" << unsigned(confidenceStats.costQ25) << " q50=" << unsigned(confidenceStats.costQ50) << " q75=" << unsigned(confidenceStats.costQ75)
+                << " threshold=" << unsigned(confidenceStats.costThreshold) << " texturedPct=" << confidenceStats.texturedPct << " reliablePct=" << confidenceStats.reliablePct
+                << " globalCoveragePct=" << confidenceStats.globalCoveragePct << " globalTrusted=" << (confidenceStats.globalTrusted ? 1 : 0)
+                << " localFillPct=" << confidenceStats.localFillPct << " globalFillPct=" << confidenceStats.globalFillPct << " zeroPct=" << confidenceStats.zeroPct
+                << " globalMotion=(" << confidenceStats.globalX << "," << confidenceStats.globalY << ")" << " repairMs=" << confidenceMs << " textureMs=" << confidenceStats.textureMs << " classifyMs=" << confidenceStats.classifyMs << " infillMs=" << confidenceStats.infillMs << " parallel=1 repairVersion=4D histogramMedian=1");
+        }
 
         FilmMotionStabilizationStats filmStats{};
         const auto stabilizeStart = convertEnd;
@@ -393,7 +614,8 @@ struct OpticalFlowEngine::Impl {
         out.sourceH = height;
         out.valid = true;
 
-        UpdatePairStats(MsBetween(uploadStart, uploadEnd),
+        UpdatePairStats(preprocessMs,
+                        MsBetween(uploadStart, uploadEnd),
                         MsBetween(executeStart, executeEnd),
                         MsBetween(downloadStart, downloadEnd),
                         MsBetween(convertStart, convertEnd),
@@ -472,3 +694,7 @@ uint32_t OpticalFlowEngine::GridH() const { return m_impl ? m_impl->gridH : 0; }
 const char* OpticalFlowEngine::PerfName() const { return m_impl ? m_impl->perfName.c_str() : "OFF"; }
 bool OpticalFlowEngine::FilmStabilizationEnabled() const { return m_impl ? m_impl->filmStabilizationEnabled : false; }
 OpticalFlowStats OpticalFlowEngine::GetStats() const { return m_impl ? m_impl->stats : OpticalFlowStats{}; }
+
+bool OpticalFlowEngine::GenerateGpu(const uint8_t* bgra,size_t bytes,bool reset,ID3D12Fence* consumedFence,uint64_t consumedValue,GpuOpticalFlowFrame& out){
+    if(!m_impl){out={};return false;}try{return m_impl->GenerateGpu(bgra,bytes,reset,consumedFence,consumedValue,out);}catch(const std::exception& e){LOG("[GPU MV] failure: "<<e.what());out={};return false;}
+}

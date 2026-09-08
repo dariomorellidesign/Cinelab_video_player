@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.0 - 2026-09-09
+
+- Simplified the player UI around SR, Frame Generation and Settings; removed obsolete depth and mask controls from normal menus.
+- Added an in-player English help guide for SR, Frame Generation, NVOF modes and optional NR integration.
+- Set the validated DLAA preset L as the default player path, substantially reducing the tested temporal trail artifact.
+- Reworked public documentation, packaging and launch material around a clean Windows x64 beta release.
+- Kept RenoDX, ReShade and NR runtimes out of the public package; they are optional external components.
+
 ## 0.11.0 - 2026-08-29
 
 - Added live post-DLSS image adjustments: brightness, contrast, saturation, gamma, temperature and tint.

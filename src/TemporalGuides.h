@@ -15,9 +15,7 @@ struct ExternalMotionField {
 };
 
 struct ExternalDepthField {
-    // Step 04E-1: normalized AI relative-nearness map used ONLY to guide Temporal Mask
-    // structure/softening. Its polarity is irrelevant because the mask consumes spatial
-    // discontinuities. The legacy Guide B / NGX depth path is not changed by this struct.
+    // Normalized AI relative nearness, shared with the renderer for this frame.
     const float* depth01 = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -54,12 +52,12 @@ struct GuideFrame {
 
 class TemporalGuideGenerator {
 public:
-    enum class DepthMode { Flat, Estimated };
+    enum class DepthMode { Flat, Estimated, AI };
 
     static std::pair<uint32_t,uint32_t> AnalysisGrid(uint32_t sourceW, uint32_t sourceH, double targetFps = 30.0);
 
     void Reset();
-    void SetDepthMode(DepthMode mode) { m_depthMode = mode; }
+    void SetDepthMode(DepthMode mode) { if (m_depthMode != mode) { Reset(); m_depthMode = mode; } }
     DepthMode GetDepthMode() const { return m_depthMode; }
     void SetOutputGrid(uint32_t w, uint32_t h) { m_outputGridW = w; m_outputGridH = h; }
 

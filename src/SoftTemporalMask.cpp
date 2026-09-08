@@ -24,7 +24,7 @@ bool SoftTemporalMaskProcessor::Build(const std::vector<float>& luma,
                                       const std::vector<float>& depth,
                                       uint32_t width,uint32_t height,
                                       bool history,
-                                      std::vector<float>& outMask){
+                                      std::vector<float>& outMask, bool constantDepth){
     const size_t n=size_t(width)*height;
     if(!width||!height||luma.size()!=n||flowX.size()!=n||flowY.size()!=n||mismatch.size()!=n||depth.size()!=n){
         outMask.assign(n,0.0f);Reset();return false;
@@ -39,7 +39,7 @@ bool SoftTemporalMaskProcessor::Build(const std::vector<float>& luma,
             const uint32_t yt=y?y-1:y, yb=std::min(height-1,y+1);
             const float div=std::abs(flowX[size_t(y)*width+xr]-flowX[size_t(y)*width+xl])+
                             std::abs(flowY[size_t(yb)*width+x]-flowY[size_t(yt)*width+x]);
-            const float depthEdge=std::max({
+            const float depthEdge=constantDepth?0.0f:std::max({
                 std::abs(depth[i]-depth[size_t(y)*width+xl]),
                 std::abs(depth[i]-depth[size_t(y)*width+xr]),
                 std::abs(depth[i]-depth[size_t(yt)*width+x]),
@@ -77,7 +77,7 @@ bool SoftTemporalMaskProcessor::Build(const std::vector<float>& luma,
             const size_t i=size_t(y)*width+x;float s=0.0f,w=0.0f;
             for(int d=-2;d<=2;++d){
                 const uint32_t xx=uint32_t(std::clamp<int>(int(x)+d,0,int(width)-1));
-                const size_t j=size_t(y)*width+xx;const float ww=k[d+2]*depthWeight(depth[i],depth[j]);s+=raw[j]*ww;w+=ww;
+                const size_t j=size_t(y)*width+xx;const float ww=k[d+2]*(constantDepth?1.0f:depthWeight(depth[i],depth[j]));s+=raw[j]*ww;w+=ww;
             }
             temp[i]=w>0.0f?s/w:raw[i];
         }
@@ -87,7 +87,7 @@ bool SoftTemporalMaskProcessor::Build(const std::vector<float>& luma,
             const size_t i=size_t(y)*width+x;float s=0.0f,w=0.0f;
             for(int d=-2;d<=2;++d){
                 const uint32_t yy=uint32_t(std::clamp<int>(int(y)+d,0,int(height)-1));
-                const size_t j=size_t(yy)*width+x;const float ww=k[d+2]*depthWeight(depth[i],depth[j]);s+=temp[j]*ww;w+=ww;
+                const size_t j=size_t(yy)*width+x;const float ww=k[d+2]*(constantDepth?1.0f:depthWeight(depth[i],depth[j]));s+=temp[j]*ww;w+=ww;
             }
             smooth[i]=w>0.0f?s/w:temp[i];
         }
