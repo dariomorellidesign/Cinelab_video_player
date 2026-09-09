@@ -62,9 +62,10 @@ See [Building](docs/BUILDING.md). The source release contains no NVIDIA, FFmpeg,
 
 ## Support
 
-<script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'Q1Y226NYO1');kofiwidget2.draw();</script> 
+If CineLab is useful to you, you can support its development:
 
-<script type="text/javascript" src="https://cdnjs.buymeacoffee.com/1.0.0/button.prod.min.js" data-name="bmc-button" data-slug="dariomorelli" data-color="#FFDD00" data-emoji=""  data-font="Cookie" data-text="Buy me a coffee" data-outline-color="#000000" data-font-color="#000000" data-coffee-color="#ffffff" ></script>
+[![Support me on Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20me-72A4F2?logo=ko-fi&logoColor=white)](https://ko-fi.com/Q1Y226NYO1)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Support-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/dariomorelli)
 
 ## Project documents
 
