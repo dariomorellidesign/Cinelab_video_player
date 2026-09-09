@@ -42,6 +42,8 @@ The beta may start on other RTX configurations, but the supported release target
 
 As explained in the beginning, this player is using D3D12 and it's fully compatible with Reshade and its filters and plugins: you can experiment with any sort of implementation of Reshade, and the video player is able to feed the motion vector data to it and apply the NR effect in a stable manner. See the [Neural Rendering guide](docs/NEURAL_RENDERING.md). The standard player remains fully functional without it.
 
+<img width="443" height="600" alt="Screenshot 2026-09-09 163349" src="https://github.com/user-attachments/assets/38108685-7c7d-4435-a5cd-421b034ba636" />
+
 ## Neural Rendering gallery
 
 The animation below alternates every two seconds between NR Off and NR On (they are not labeled on purpose):
@@ -52,6 +54,8 @@ This was made using the "default" or "A" type of NR; the "default" algorithm ten
     <img src="docs/images/nr-gallery/nr-scene-12-animated.gif" width="960" alt="Animated Neural Rendering comparison, scene 12">
   </a>
 </p>
+
+<img width="327" height="118" alt="Screenshot 2026-09-09 163409" src="https://github.com/user-attachments/assets/3100331c-01c0-4cd4-9d4a-4bb5ccd5ac8f" />
 
 Other algorithms ( *Natural*/B or *Cinematic*/C ) will apply genrally stronger presets of ambient lighting:
 - **Natural** adds an "overcast" skylight from above, and has stronger general contrast. it will add reflections on skin, shadows under flat lighted objects, and reflections on flat shaded ground or walls
