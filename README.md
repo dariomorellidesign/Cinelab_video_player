@@ -1,6 +1,12 @@
 # CineLab Video Player
 
-A Windows x64 video player for NVIDIA RTX GPUs. It combines FFmpeg decoding, a Direct3D 12 renderer, NVIDIA Optical Flow, DLSS Super Resolution and DLSS Frame Generation for high-quality video playback experiments.
+A video player for Windows x64 and NVIDIA RTX GPUs. It combines FFmpeg decoding, a Direct3D 12 renderer, NVIDIA Optical Flow, DLSS Super Resolution and DLSS Frame Generation, and support for DLSS Neural Rendering, for cutting-edge video playback experiments.
+
+## If you're here just for the Neural Rendering:
+
+This player doesn't come out-of-the-box with the Neural Rendering (NR) feature: you have to manually enable it through Reshade and its RenoDX plugin: this is to guarantee the correct licensing, but also to have a modular system, since the RenoDX plugin is in continuous evolution, you'll be able to experiment with any present or future release of the Neural Rendering feature. 
+
+[How to enable it](docs/NEURAL_RENDERING.md)
 
 > **Release status:** public beta. The release package targets Windows x64 systems with an NVIDIA RTX 50-series GPU. It includes the player, decoder tools, native DLSS SR, and the official production-signed NVIDIA Streamline runtime required by DLSS Frame Generation. Availability still depends on the installed NVIDIA driver and the GPU/runtime capability reported by the player.
 
@@ -31,8 +37,6 @@ A Windows x64 video player for NVIDIA RTX GPUs. It combines FFmpeg decoding, a D
 The beta may start on other RTX configurations, but the supported release target is RTX 50-series hardware.
 
 ## Optional Neural Rendering / RenoDX integration
-
-RenoDX and DLSS 5 NR are **not part of the public package**. They are optional external components with their own distribution terms. This project does not distribute or provide a bypass for proprietary NR runtimes.
 
 If you already have a compatible, lawfully obtained installation, see the [Neural Rendering guide](docs/NEURAL_RENDERING.md). The standard player remains fully functional without it.
 
