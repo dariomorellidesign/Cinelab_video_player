@@ -19,6 +19,8 @@ if not exist "dist" mkdir "dist"
 mkdir "%STAGE%"
 
 copy /y "%SRC%\CineLabVideoPlayer.exe" "%STAGE%\CineLabVideoPlayer.exe" >nul
+copy /y "%SRC%\RELEASE_RUNTIME.txt" "%STAGE%\RELEASE_RUNTIME.txt" >nul
+copy /y "%SRC%\step05b-runtime.enable" "%STAGE%\step05b-runtime.enable" >nul
 copy /y "%SRC%\ffmpeg.exe" "%STAGE%\ffmpeg.exe" >nul
 copy /y "%SRC%\ffprobe.exe" "%STAGE%\ffprobe.exe" >nul
 copy /y "%SRC%\sl.common.dll" "%STAGE%\sl.common.dll" >nul

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.12.4
+
+- Restored the Streamline activation marker in the archive so the bundled NVIDIA DLSS Frame Generation runtime can initialize.
+
 ## 0.12.3
 
 - Bundled the official NVIDIA Streamline production runtime required by DLSS Frame Generation, including the associated NVIDIA notices.

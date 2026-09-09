@@ -24,6 +24,9 @@ foreach($name in $streamlineFiles){
     Copy-Item -LiteralPath $sourceFile -Destination (Join-Path $release $name)
 }
 Copy-Item -LiteralPath (Join-Path $root 'external\streamline-sdk-v2.12.0\license.txt') -Destination (Join-Path $release 'NVIDIA_STREAMLINE_LICENSE.txt')
+# The player loads FG only from an explicitly marked, self-contained runtime folder.
+# This marker is part of the public release, not a user setting.
+New-Item -ItemType File -Path (Join-Path $release 'step05b-runtime.enable') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'languages') -Destination (Join-Path $release 'languages') -Recurse
 foreach($name in @('README.md','LICENSE','THIRD_PARTY.md','CHANGELOG.md')){Copy-Item -LiteralPath (Join-Path $root $name) -Destination $release}
 Copy-Item -LiteralPath (Join-Path $root 'docs') -Destination (Join-Path $release 'docs') -Recurse
