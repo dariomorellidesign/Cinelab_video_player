@@ -11,10 +11,10 @@ This is an **optional, experimental** path. CineLab itself provides video playba
 
 ## The simple workflow
 
-1. Extract CineLab to a dedicated folder, for example `C:\CineLab-NR-Test`.
+1. Extract CineLab to a dedicated folder.
 2. Start CineLab once and confirm that normal playback works with **SR Off**.
-3. Install a compatible ReShade build with add-on support for `CineLabVideoPlayer.exe`, selecting the DirectX 10/11/12 path when asked by its installer.
-4. Add the compatible RenoDX/NR components supplied by their own provider to this same test folder. Keep components from one matching release together.
+3. Install a compatible [ReShade build with add-on support](https://reshade.me/#download) , selecting `CineLabVideoPlayer.exe`, and then selecting the DirectX 10/11/12 path when asked by its installer.
+4. Add the compatible RenoDX/NR components supplied by their own provider to this same test folder. Keep components from one matching release together: You can find all the components and DLLs on [their Discord channel](https://discord.com/invite/renodx) .
 5. Start CineLab and press **Home** to open ReShade. Open **Add-ons**, locate the Neural Rendering panel, enable it, then return to the video.
 6. Use the player’s **SR** control as the carrier path required by the optional component. Compare it against **SR Off** with the same scene and output resolution.
 
@@ -22,9 +22,10 @@ This is an **optional, experimental** path. CineLab itself provides video playba
 
 Some community tools automate ReShade and related optional files. They are not CineLab dependencies and are not bundled, validated or supported by this project. In particular, a tool may download closed-source or leaked runtime components; read its documentation, licences and release notes before running it.
 
-[DLSS5oneclick](https://github.com/faisalkindi/DLSS5oneclick) is a community installer that can be used as a reference for a separate, user-managed experiment folder. Its own documentation states that its Neural Rendering add-on and model are leaked, closed-source components downloaded at install time. CineLab does not invoke the tool, download its dependencies, bundle its files, or modify its installation plan.
+[DLSS5oneclick](https://github.com/faisalkindi/DLSS5oneclick) is a community installer that can be used as to simplify the installation: instead of the workflow described earlier, you can launch this and it will do everything with a one-click operation. Its own documentation states that its Neural Rendering add-on and model are leaked, closed-source components downloaded at install time. CineLab does not invoke the tool, download its dependencies, bundle its files, or modify its installation plan.
+This method is perfect to enable the feature without much hassle, but going straight to the source (the Discord channel) will enable to find other versions of the plugin, more suited to your needs (for example, support for older GPUs, multiple NR passes, etc.)
 
-For CineLab, choose a tool only if it lets you select `CineLabVideoPlayer.exe` in the dedicated test folder and makes its changes reversible. Keep its manifest/log files, use its removal command before changing versions, and never let it overwrite your clean CineLab install.
+For CineLab, choose a tool only if it lets you select `CineLabVideoPlayer.exe` in the dedicated folder and makes its changes reversible. Keep its manifest/log files, use its removal command before changing versions, and never let it overwrite your clean CineLab install.
 
 ## Verification and troubleshooting
 
