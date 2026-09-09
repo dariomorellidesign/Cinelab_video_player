@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.3
+
+- Bundled the official NVIDIA Streamline production runtime required by DLSS Frame Generation, including the associated NVIDIA notices.
+- Kept optional ReShade, RenoDX and DLSS NR files out of the distribution because they are not part of a redistributable CineLab runtime.
+
 ## 0.12.2 - 2026-09-09
 
 - Renamed the public executable, configuration and log files to CineLabVideoPlayer.
