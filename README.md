@@ -44,7 +44,8 @@ As explained in the beginning, this player is using D3D12 and it's fully compati
 
 ## Neural Rendering gallery
 
-The animation below alternates every two seconds between NR Off and NR On. The left side of every full-resolution comparison is NR Off; the right side is NR On.
+The animation below alternates every two seconds between NR Off and NR On (they are not labeled on purpose):
+This was made using the "default" or "A" type of NR; the "default" algorithm tends to shade objects (especially faces/people) that are too flat by applying an approximation of the scene lights, and if a light source is visible in the frame, that will become the primary source for the shading. 
 
 <p align="center">
   <a href="docs/images/nr-gallery/nr-scene-12-animated.gif">
@@ -52,28 +53,36 @@ The animation below alternates every two seconds between NR Off and NR On. The l
   </a>
 </p>
 
-<details>
-<summary><strong>Open selected full-resolution comparisons</strong></summary>
+Other algorithms ( *Natural*/B or *Cinematic*/C ) will apply genrally stronger presets of ambient lighting:
+- **Natural** adds an "overcast" skylight from above, and has stronger general contrast. it will add reflections on skin, shadows under flat lighted objects, and reflections on flat shaded ground or walls
+- **Cinematic** has waker skylight, but will instead add a rim/backlight to people and objects from many angles, including below faces, giving an extreme/HDR look to people, often unnatural.
 
-### Scene 03
+In conclusion, **most of the scenes look better with the "default" algorithm**, and the other two should be probably toned down from the standard values to not look uncanny.
+
+### Black and white movies
+
+The NR will tend to colorize faces in B/W movies. It can look amazing in some selected scenes, but it's mostly distracting. Maybe useful for restoring old hand-colored movies:
 
 <a href="docs/images/nr-gallery/nr-scene-03-comparison.jpg">
   <img src="docs/images/nr-gallery/nr-scene-03-comparison.jpg" width="100%" alt="Scene 03, NR Off on the left and NR On on the right">
 </a>
 
-### Scene 21
+### 3D animation
+
+The older/flatter the rendering, the better is the effect: most modern 3D animation is so stylized or realistic that the NR often doesn't add much to the picture. As for videogames (the thing DLSS NR was trained on) **most of older '90s and '00s 3D animation or special effects in live action movies can be improved with NR:**
 
 <a href="docs/images/nr-gallery/nr-scene-21-comparison.jpg">
   <img src="docs/images/nr-gallery/nr-scene-21-comparison.jpg" width="100%" alt="Scene 21, NR Off on the left and NR On on the right">
 </a>
 
-### Scene 22
+### Noise/haze/bloom
+
+Scenes with hazy/bloomy lighting will be enhanced for more clarity, which can go against the original intent, or noisy footage such as heavy film grain or snow/rain/particles could be smoothed out, erasing some of the particles/noise:
 
 <a href="docs/images/nr-gallery/nr-scene-22-comparison.jpg">
   <img src="docs/images/nr-gallery/nr-scene-22-comparison.jpg" width="100%" alt="Scene 22, NR Off on the left and NR On on the right">
 </a>
 
-</details>
 
 ## Frame Generation
 
