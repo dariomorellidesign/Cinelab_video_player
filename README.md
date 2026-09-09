@@ -30,11 +30,11 @@ A Windows x64 video player for NVIDIA RTX GPUs. It combines FFmpeg decoding, a D
 
 The beta may start on other RTX configurations, but the supported release target is RTX 50-series hardware.
 
-## Optional NR / RenoDX integration
+## Optional Neural Rendering / RenoDX integration
 
 RenoDX and DLSS 5 NR are **not part of the public package**. They are optional external components with their own distribution terms. This project does not distribute or provide a bypass for proprietary NR runtimes.
 
-If you already have a compatible, lawfully obtained installation, see [the optional integration guide](docs/OPTIONAL_NR_SETUP.md). The standard player remains fully functional without it.
+If you already have a compatible, lawfully obtained installation, see the [Neural Rendering guide](docs/NEURAL_RENDERING.md). The standard player remains fully functional without it.
 
 ## Controls
 
@@ -61,6 +61,8 @@ If the player is useful to you, voluntary support helps fund testing and mainten
 ## Project documents
 
 - [User guide](docs/USER_GUIDE.md)
+- [Neural Rendering guide](docs/NEURAL_RENDERING.md)
+- [NR visual comparison guide](docs/NR_VISUAL_COMPARISONS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Building](docs/BUILDING.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)

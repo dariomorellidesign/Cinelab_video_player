@@ -3,12 +3,15 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 set /p VERSION=<VERSION
-set "SRC=build\Release"
+rem Step07D is the validated public-player build. Keep proprietary optional
+rem components out of the package; this script copies only its executable and
+rem the core playback runtime files listed below.
+set "SRC=build\step07d-player\runtime"
 set "STAGE=dist\CineLabVideoPlayer-v%VERSION%-win64"
 set "ZIP=dist\CineLabVideoPlayer-v%VERSION%-win64.zip"
 
 if not exist "%SRC%\DLSSVideoPlayer.exe" (
-  echo [ERROR] Build first with build_windows.bat
+  echo [ERROR] Build the validated player first with tools\Build-Step07D.ps1
   exit /b 1
 )
 
