@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.1 - 2026-09-09
+
+- Rebuilt the public package from the validated Step07D player runtime.
+- Replaces the 0.12.0 package, which was assembled from an older build\\Release executable.
+
 ## 0.12.0 - 2026-09-09
 
 - Simplified the player UI around SR, Frame Generation and Settings; removed obsolete depth and mask controls from normal menus.
