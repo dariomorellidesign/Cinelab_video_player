@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.2 - 2026-09-09
+
+- Renamed the public executable, configuration and log files to CineLabVideoPlayer.
+- Formally promoted the rebuilt Step07D runtime to build\\Release before packaging.
+- Removed obsolete internal step documentation from the public repository.
+
 ## 0.12.1 - 2026-09-09
 
 - Rebuilt the public package from the validated Step07D player runtime.
