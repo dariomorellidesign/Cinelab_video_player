@@ -2,11 +2,12 @@
 
 A video player for Windows x64 and NVIDIA RTX GPUs. It combines FFmpeg decoding, a Direct3D 12 renderer, NVIDIA Optical Flow, DLSS Super Resolution and DLSS Frame Generation, and support for DLSS Neural Rendering, for cutting-edge video playback experiments.
 
-## If you're here just for the Neural Rendering:
+## If you're here just for the **Neural Rendering** :
 
-This player doesn't come out-of-the-box with the Neural Rendering (NR) feature: you have to manually enable it through Reshade and its RenoDX plugin: this is to guarantee the correct licensing, but also to have a modular system, since the RenoDX plugin is in continuous evolution, you'll be able to experiment with any present or future release of the Neural Rendering feature. 
+This player doesn't come out-of-the-box with the Neural Rendering (NR) feature: you have to **manually enable it** through Reshade and its RenoDX plugin: this is to guarantee the correct licensing, but also to have a modular system, since the RenoDX plugin is in continuous evolution, you'll be able to experiment with any present or future release of the Neural Rendering feature. 
 
 [How to enable it](docs/NEURAL_RENDERING.md)
+
 
 > **Release status:** public beta. The release package targets Windows x64 systems with an NVIDIA RTX 50-series GPU. It includes the player, decoder tools, native DLSS SR, and the official production-signed NVIDIA Streamline runtime required by DLSS Frame Generation. Availability still depends on the installed NVIDIA driver and the GPU/runtime capability reported by the player.
 
@@ -27,6 +28,7 @@ This player doesn't come out-of-the-box with the Neural Rendering (NR) feature: 
 4. Leave **SR** off for native-resolution playback. Enable it only when you want DLSS reconstruction.
 5. Open **Settings** for SR quality, Frame Generation, V-Sync, audio, subtitles and developer controls.
 6. Use the **?** button for the in-player guide.
+7. If the player works as-is, you can then experiment by adding the NR feature
 
 ## Requirements
 
@@ -38,7 +40,7 @@ The beta may start on other RTX configurations, but the supported release target
 
 ## Optional Neural Rendering / RenoDX integration
 
-If you already have a compatible, lawfully obtained installation, see the [Neural Rendering guide](docs/NEURAL_RENDERING.md). The standard player remains fully functional without it.
+As explained in the beginning, this player is using D3D12 and it's fully compatible with Reshade and its filters and plugins: you can experiment with any sort of implementation, and the video player is able to feed the motion vector data to it and apply the NR effect in a stable manner. See the [Neural Rendering guide](docs/NEURAL_RENDERING.md). The standard player remains fully functional without it.
 
 ## Controls
 
@@ -60,7 +62,9 @@ See [Building](docs/BUILDING.md). The source release contains no NVIDIA, FFmpeg,
 
 ## Support
 
-If the player is useful to you, voluntary support helps fund testing and maintenance. The public support link will appear here and in the GitHub sidebar once the project owner provides a Ko-fi or Buy Me a Coffee profile URL. See [support setup](docs/SUPPORT_SETUP.md).
+<script type='text/javascript' src='https://storage.ko-fi.com/cdn/widget/Widget_2.js'></script><script type='text/javascript'>kofiwidget2.init('Support me on Ko-fi', '#72a4f2', 'Q1Y226NYO1');kofiwidget2.draw();</script> 
+
+<script type="text/javascript" src="https://cdnjs.buymeacoffee.com/1.0.0/button.prod.min.js" data-name="bmc-button" data-slug="dariomorelli" data-color="#FFDD00" data-emoji=""  data-font="Cookie" data-text="Buy me a coffee" data-outline-color="#000000" data-font-color="#000000" data-coffee-color="#ffffff" ></script>
 
 ## Project documents
 
