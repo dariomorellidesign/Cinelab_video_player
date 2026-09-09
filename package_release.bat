@@ -6,12 +6,12 @@ set /p VERSION=<VERSION
 rem Step07D is the validated public-player build. Keep proprietary optional
 rem components out of the package; this script copies only its executable and
 rem the core playback runtime files listed below.
-set "SRC=build\step07d-player\runtime"
+set "SRC=build\Release"
 set "STAGE=dist\CineLabVideoPlayer-v%VERSION%-win64"
 set "ZIP=dist\CineLabVideoPlayer-v%VERSION%-win64.zip"
 
 if not exist "%SRC%\DLSSVideoPlayer.exe" (
-  echo [ERROR] Build the validated player first with tools\Build-Step07D.ps1
+  echo [ERROR] Promote the validated player first with tools\Promote-Step07DToRelease.ps1
   exit /b 1
 )
 
