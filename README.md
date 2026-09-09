@@ -40,7 +40,20 @@ The beta may start on other RTX configurations, but the supported release target
 
 ## Optional Neural Rendering / RenoDX integration
 
-As explained in the beginning, this player is using D3D12 and it's fully compatible with Reshade and its filters and plugins: you can experiment with any sort of implementation, and the video player is able to feed the motion vector data to it and apply the NR effect in a stable manner. See the [Neural Rendering guide](docs/NEURAL_RENDERING.md). The standard player remains fully functional without it.
+As explained in the beginning, this player is using D3D12 and it's fully compatible with Reshade and its filters and plugins: you can experiment with any sort of implementation of Reshade, and the video player is able to feed the motion vector data to it and apply the NR effect in a stable manner. See the [Neural Rendering guide](docs/NEURAL_RENDERING.md). The standard player remains fully functional without it.
+
+## Frame Generation
+
+This is still an experimental feature since the quality is not satisfactory in every scene:
+this video player can multiply the framerate of the video up to 6X the original, but in fast moving scenes it breaks apart, mainly because of the motion vector calculation is being confused by the motion blur of the frame, so this feature is suitable for:
+
+- slow moving footage
+- fast moving but with fast shutter/low motion blur
+- high multipliers (such as 6X) for high-refresh-rate screens (such as 144hz for example)
+
+The FG is compatible with V-sync, and when it's enabled, any multiplier that exceed the v-sync speed will be disabled.
+
+**For 2X multiplier** the best way to obtain it is not through the DLSS Frame Generation, but with the *"Smooth Motion"* feature in the Nvidia drivers: it can be enabled in the Nvidia app/control panel by adding the .exe to the list. This option will double the FPS of any video in Cinelab Video Player, but the app needs to restart every time the setting is changed to take effect. During playback using "smooth motion" the FPS counter will still show the source FPS.
 
 ## Controls
 
