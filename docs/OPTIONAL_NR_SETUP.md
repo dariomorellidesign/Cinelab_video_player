@@ -1,6 +1,6 @@
 # Optional NR / RenoDX integration
 
-The public DLSS Video Player release does not include RenoDX, ReShade, DLSS NR or any related proprietary runtime files. The player does not need them for normal playback, DLSS Super Resolution or supported Frame Generation.
+The public CineLab Video Player release does not include RenoDX, ReShade, DLSS NR or any related proprietary runtime files. The player does not need them for normal playback, DLSS Super Resolution or supported Frame Generation.
 
 If you independently possess a compatible installation and its licence permits local use, install it using the supplier's official documentation. Do not copy unknown DLLs into the public release folder and do not mix unrelated runtime versions.
 

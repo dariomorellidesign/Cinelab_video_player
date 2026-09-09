@@ -42,7 +42,7 @@ jobs:
         shell: powershell
         run: |
           $tag = "${{ github.ref_name }}"
-          $stage = "dist/DLSSVideoPlayer-$tag-win64"
+          $stage = "dist/CineLabVideoPlayer-$tag-win64"
           New-Item -ItemType Directory -Force $stage | Out-Null
           Copy-Item build/Release/DLSSVideoPlayer.exe $stage/
           Copy-Item external/ffmpeg/bin/ffmpeg.exe $stage/
@@ -52,7 +52,7 @@ jobs:
           Copy-Item docs $stage/docs -Recurse
           Remove-Item "$stage/docs/PIPELINE_GUIDATA_STEP06A4D.md" -ErrorAction SilentlyContinue
           Copy-Item README.md,LICENSE,THIRD_PARTY.md,CHANGELOG.md $stage/
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist/DLSSVideoPlayer-$tag-win64.zip" -CompressionLevel Optimal
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/CineLabVideoPlayer-$tag-win64.zip" -CompressionLevel Optimal
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

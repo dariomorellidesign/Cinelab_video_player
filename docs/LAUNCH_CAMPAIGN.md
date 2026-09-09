@@ -2,7 +2,7 @@
 
 ## Goal
 
-Introduce DLSS Video Player as a free Windows x64 beta for RTX 50-series owners, demonstrate native playback and optional DLSS SR/FG, and invite reproducible feedback. Voluntary support is visible but secondary to the download and documentation.
+Introduce CineLab Video Player as a free Windows x64 beta for RTX 50-series owners, demonstrate native playback and optional DLSS SR/FG, and invite reproducible feedback. Voluntary support is visible but secondary to the download and documentation.
 
 ## Assets
 
@@ -25,11 +25,11 @@ Check each community's rules immediately before posting. Do not cross-post the s
 
 ## Release announcement
 
-**Title:** DLSS Video Player 0.12.0 beta — free Windows D3D12 player for RTX 50-series
+**Title:** CineLab Video Player 0.12.0 beta — free Windows D3D12 player for RTX 50-series
 
 **Text:**
 
-DLSS Video Player is a free, open-source Windows x64 video player built around FFmpeg, Direct3D 12, NVIDIA Optical Flow and DLSS. This beta targets RTX 50-series hardware and provides native playback, optional DLSS Super Resolution modes, and Frame Generation controls when supported by the installed runtime.
+CineLab Video Player is a free, open-source Windows x64 video player built around FFmpeg, Direct3D 12, NVIDIA Optical Flow and DLSS. This beta targets RTX 50-series hardware and provides native playback, optional DLSS Super Resolution modes, and Frame Generation controls when supported by the installed runtime.
 
 The release includes the ready-to-run player and a separate source archive. SR is off by default for native playback. Please report reproducible issues with GPU, driver, video format and a short log excerpt. Optional RenoDX/NR components are not bundled.
 
@@ -39,11 +39,11 @@ Voluntary support: [support link]
 
 ## Reddit draft
 
-**Title:** I released a free D3D12/DLSS video player beta for RTX 50-series testing
+**Title:** CineLab: a free D3D12/DLSS video player beta for RTX 50-series testing
 
 **Post:**
 
-I built DLSS Video Player, a free Windows x64 beta that uses FFmpeg decoding, D3D12, NVIDIA Optical Flow and DLSS for video playback experiments. It has a native SR-Off path, DLAA and scalable SR modes, plus Frame Generation controls when supported by the installed driver/runtime.
+I built CineLab Video Player, a free Windows x64 beta that uses FFmpeg decoding, D3D12, NVIDIA Optical Flow and DLSS for video playback experiments. It has a native SR-Off path, DLAA and scalable SR modes, plus Frame Generation controls when supported by the installed driver/runtime.
 
 The source code and a ready-to-run release are on GitHub. I am looking for reproducible playback reports: GPU, driver version, video codec/resolution/FPS, selected SR/FG setting, and whether the issue happens in the clean install.
 
@@ -51,11 +51,11 @@ The source code and a ready-to-run release are on GitHub. I am looking for repro
 
 ## YouTube draft
 
-**Title:** DLSS Video Player beta: DLAA, Super Resolution and Frame Generation for video playback
+**Title:** CineLab Video Player beta: DLAA, Super Resolution and Frame Generation for video playback
 
 **Description:**
 
-DLSS Video Player is a free Windows x64 beta for NVIDIA RTX 50-series hardware. This short demonstration shows native SR-Off playback, DLAA, scalable Super Resolution and Frame Generation availability.
+CineLab Video Player is a free Windows x64 beta for NVIDIA RTX 50-series hardware. This short demonstration shows native SR-Off playback, DLAA, scalable Super Resolution and Frame Generation availability.
 
 Download, source and documentation: [GitHub Release link]
 Voluntary support: [support link]

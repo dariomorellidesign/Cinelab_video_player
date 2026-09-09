@@ -4,8 +4,8 @@ cd /d "%~dp0"
 
 set /p VERSION=<VERSION
 set "SRC=build\Release"
-set "STAGE=dist\DLSSVideoPlayer-v%VERSION%-win64"
-set "ZIP=dist\DLSSVideoPlayer-v%VERSION%-win64.zip"
+set "STAGE=dist\CineLabVideoPlayer-v%VERSION%-win64"
+set "ZIP=dist\CineLabVideoPlayer-v%VERSION%-win64.zip"
 
 if not exist "%SRC%\DLSSVideoPlayer.exe" (
   echo [ERROR] Build first with build_windows.bat

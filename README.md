@@ -1,4 +1,4 @@
-# DLSS Video Player
+# CineLab Video Player
 
 A Windows x64 video player for NVIDIA RTX GPUs. It combines FFmpeg decoding, a Direct3D 12 renderer, NVIDIA Optical Flow, DLSS Super Resolution and DLSS Frame Generation for high-quality video playback experiments.
 
@@ -15,7 +15,7 @@ A Windows x64 video player for NVIDIA RTX GPUs. It combines FFmpeg decoding, a D
 
 ## Quick start
 
-1. Download `DLSSVideoPlayer-v0.12.0-win64.zip` from GitHub Releases and extract it anywhere writable.
+1. Download `CineLabVideoPlayer-v0.12.0-win64.zip` from GitHub Releases and extract it anywhere writable.
 2. Run `DLSSVideoPlayer.exe`.
 3. Click **Open** or drag a video into the window.
 4. Leave **SR** off for native-resolution playback. Enable it only when you want DLSS reconstruction.
