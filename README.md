@@ -42,6 +42,39 @@ The beta may start on other RTX configurations, but the supported release target
 
 As explained in the beginning, this player is using D3D12 and it's fully compatible with Reshade and its filters and plugins: you can experiment with any sort of implementation of Reshade, and the video player is able to feed the motion vector data to it and apply the NR effect in a stable manner. See the [Neural Rendering guide](docs/NEURAL_RENDERING.md). The standard player remains fully functional without it.
 
+## Neural Rendering gallery
+
+The animation below alternates every two seconds between NR Off and NR On. The left side of every full-resolution comparison is NR Off; the right side is NR On.
+
+<p align="center">
+  <a href="docs/images/nr-gallery/nr-scene-12-animated.gif">
+    <img src="docs/images/nr-gallery/nr-scene-12-animated.gif" width="960" alt="Animated Neural Rendering comparison, scene 12">
+  </a>
+</p>
+
+<details>
+<summary><strong>Open selected full-resolution comparisons</strong></summary>
+
+### Scene 03
+
+<a href="docs/images/nr-gallery/nr-scene-03-comparison.jpg">
+  <img src="docs/images/nr-gallery/nr-scene-03-comparison.jpg" width="100%" alt="Scene 03, NR Off on the left and NR On on the right">
+</a>
+
+### Scene 21
+
+<a href="docs/images/nr-gallery/nr-scene-21-comparison.jpg">
+  <img src="docs/images/nr-gallery/nr-scene-21-comparison.jpg" width="100%" alt="Scene 21, NR Off on the left and NR On on the right">
+</a>
+
+### Scene 22
+
+<a href="docs/images/nr-gallery/nr-scene-22-comparison.jpg">
+  <img src="docs/images/nr-gallery/nr-scene-22-comparison.jpg" width="100%" alt="Scene 22, NR Off on the left and NR On on the right">
+</a>
+
+</details>
+
 ## Frame Generation
 
 This is still an experimental feature since the quality is not satisfactory in every scene:
