@@ -83,6 +83,9 @@ Scenes with hazy/bloomy lighting will be enhanced for more clarity, which can go
   <img src="docs/images/nr-gallery/nr-scene-22-comparison.jpg" width="100%" alt="Scene 22, NR Off on the left and NR On on the right">
 </a>
 
+<p align="center">
+  <a href="docs/NR_GALLERY.md"><strong>Browse the complete 51-scene gallery &rarr;</strong></a>
+</p>
 
 ## Frame Generation
 
