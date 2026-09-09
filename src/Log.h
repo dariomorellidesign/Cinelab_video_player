@@ -22,7 +22,7 @@ public:
         m_file.flush();
     }
 private:
-    Log() : m_file("DLSSVideoPlayer.log", std::ios::out | std::ios::trunc) {}
+    Log() : m_file("CineLabVideoPlayer.log", std::ios::out | std::ios::trunc) {}
     std::ofstream m_file;
     std::mutex m_mutex;
 };

@@ -2,12 +2,12 @@
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
-if exist "DLSSVideoPlayer.exe" (
+if exist "CineLabVideoPlayer.exe" (
   set "OUT=."
 ) else (
   set "OUT=build\Release"
 )
-set "EXE=%OUT%\DLSSVideoPlayer.exe"
+set "EXE=%OUT%\CineLabVideoPlayer.exe"
 set "NOPAUSE=0"
 if /I "%~1"=="--no-pause" set "NOPAUSE=1"
 
@@ -18,7 +18,7 @@ if not exist "%EXE%" (
 )
 
 echo ================================================================
-echo DLSS Video Player V11 - DLSS / experimental DLSS 5 readiness
+echo CineLab Video Player V11 - DLSS / experimental DLSS 5 readiness
 echo ================================================================
 
 rem If the user dropped/extracted the experimental pack in the project root or a

@@ -44,7 +44,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $stage = "dist/CineLabVideoPlayer-$tag-win64"
           New-Item -ItemType Directory -Force $stage | Out-Null
-          Copy-Item build/Release/DLSSVideoPlayer.exe $stage/
+          Copy-Item build/Release/CineLabVideoPlayer.exe $stage/
           Copy-Item external/ffmpeg/bin/ffmpeg.exe $stage/
           Copy-Item external/ffmpeg/bin/ffprobe.exe $stage/
           Copy-Item external/DLSS/lib/Windows_x86_64/rel/nvngx_dlss.dll $stage/

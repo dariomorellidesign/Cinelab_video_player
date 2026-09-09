@@ -31,10 +31,10 @@ jobs:
       - name: Upload executable artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DLSSVideoPlayer-windows-x64
+          name: CineLabVideoPlayer-windows-x64
           if-no-files-found: error
           path: |
-            build/Release/DLSSVideoPlayer.exe
+            build/Release/CineLabVideoPlayer.exe
             build/Release/nvngx_dlss.dll
             build/Release/languages/**
             LICENSE

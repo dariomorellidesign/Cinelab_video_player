@@ -7,10 +7,10 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-if exist "DLSSVideoPlayer.exe" (
-  set "EXE=DLSSVideoPlayer.exe"
+if exist "CineLabVideoPlayer.exe" (
+  set "EXE=CineLabVideoPlayer.exe"
 ) else (
-  set "EXE=build\Release\DLSSVideoPlayer.exe"
+  set "EXE=build\Release\CineLabVideoPlayer.exe"
 )
 if not exist "%EXE%" exit /b 1
 start "" "%EXE%" --quality auto %*

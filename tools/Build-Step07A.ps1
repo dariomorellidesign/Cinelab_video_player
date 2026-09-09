@@ -1,4 +1,4 @@
-﻿#requires -Version 7.0
+#requires -Version 7.0
 [CmdletBinding()]
 param(
     [switch]$GpuTests,
@@ -13,8 +13,9 @@ $build=Join-Path $repo ('build\'+$StepName+'-build')
 $tests=Join-Path $repo ('build\'+$StepName+'-tests')
 $base=Join-Path $repo 'build\step06a4c-player\runtime'
 $stage=Join-Path $repo ('build\'+$StepName+'-player\runtime')
-$release=Join-Path $repo 'build\Release\DLSSVideoPlayer.exe'
-$protectedHash=(Get-FileHash -LiteralPath $release).Hash
+$release=Join-Path $repo 'build\Release\CineLabVideoPlayer.exe'
+$protectedHash=$null
+if(Test-Path -LiteralPath $release){$protectedHash=(Get-FileHash -LiteralPath $release).Hash}
 
 function Invoke-Native([string]$Executable,[string[]]$Arguments) {
     # Some desktop-agent environments contain both Path and PATH. MSBuild's
@@ -33,7 +34,7 @@ function Invoke-Native([string]$Executable,[string[]]$Arguments) {
     if($process.ExitCode -ne 0){throw "$Executable failed: $($process.ExitCode)"}
 }
 
-foreach($path in @($cmake,$base,$release)){if(-not(Test-Path -LiteralPath $path)){throw "Missing prerequisite: $path"}}
+foreach($path in @($cmake,$base)){if(-not(Test-Path -LiteralPath $path)){throw "Missing prerequisite: $path"}}
 $sdk=Join-Path $repo 'external\NvOFSDK\Common\NvOFBase'
 if(-not(Select-String -LiteralPath (Join-Path $sdk 'NvOF.cpp') -SimpleMatch 'enableOutputCost = NV_OF_TRUE' -Quiet)) {
     throw 'The Step06A3 NVOF cost-buffer dependency patch is missing. See patches/nvof-step06a3-cost.patch.'
@@ -43,12 +44,12 @@ foreach($mapping in @('ofBufFormat = NV_OF_BUFFER_FORMAT_UINT8','dxgiFormat = DX
         throw 'The Step06A3 NVOF R8_UINT mapping patch is missing. See patches/nvof-step06a3-cost.patch.'
     }
 }
-$running=@(Get-Process -Name DLSSVideoPlayer -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq (Join-Path $stage 'DLSSVideoPlayer.exe')})
+$running=@(Get-Process -Name CineLabVideoPlayer -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq (Join-Path $stage 'CineLabVideoPlayer.exe')})
 if($running.Count){throw "Close the $StepName test player before replacing its executable."}
 Invoke-Native $cmake @('-S',$repo,'-B',$build,'-G','Visual Studio 17 2022','-A','x64',
     '-DDMP_TRTRTX_ROOT=C:\PROGETTO_DLSS\TensorRT-RTX-SDK\TensorRT-RTX-1.6.1.120',
     '-DCUDAToolkit_ROOT=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4')
-Invoke-Native $cmake @('--build',$build,'--config','Release','--target','DLSSVideoPlayer','--parallel','4')
+Invoke-Native $cmake @('--build',$build,'--config','Release','--target','CineLabVideoPlayer','--parallel','4')
 $gpu=if($GpuTests){'ON'}else{'OFF'}
 Invoke-Native $cmake @('-S',(Join-Path $repo 'tests'),'-B',$tests,'-G','Visual Studio 17 2022','-A','x64',('-DDMP_BUILD_GPU_TESTS='+$gpu))
 Invoke-Native $cmake @('--build',$tests,'--config','Release','--parallel','4')
@@ -61,9 +62,9 @@ if(-not(Test-Path -LiteralPath $stage)) {
 foreach($file in (Get-ChildItem -LiteralPath $base -File | Where-Object {$_.Extension -in '.dll','.addon64'})) {
     if((Get-FileHash -LiteralPath $file.FullName).Hash -ne (Get-FileHash -LiteralPath (Join-Path $stage $file.Name)).Hash){throw "Runtime dependency differs: $($file.Name)"}
 }
-$exe=Join-Path $stage 'DLSSVideoPlayer.exe'
-Copy-Item -LiteralPath (Join-Path $build 'Release\DLSSVideoPlayer.exe') -Destination $exe -Force
+$exe=Join-Path $stage 'CineLabVideoPlayer.exe'
+Copy-Item -LiteralPath (Join-Path $build 'Release\CineLabVideoPlayer.exe') -Destination $exe -Force
 @(($StepName.ToUpperInvariant()+'_RUNTIME=1'),'SOURCE_REVISION=Step07D','BASE=Step06A4C','MOTION_PIPELINE=GPU_LOCAL_PLUS_CAMERA','SCENE_CUT=SPARSE_DECODER','DEPTH=CONSTANT','MASK=GPU_DISOCCLUSION','CPU_REFERENCE=Step06A4E','STREAMLINE_FAILED_DEVICE=native_fallback',('EXE_SHA256='+(Get-FileHash -LiteralPath $exe).Hash)) |
     Set-Content -LiteralPath (Join-Path $stage ($StepName+'-runtime.txt')) -Encoding utf8
-if((Get-FileHash -LiteralPath $release).Hash -ne $protectedHash){throw 'Official Release changed unexpectedly'}
+if($protectedHash -and (Get-FileHash -LiteralPath $release).Hash -ne $protectedHash){throw 'Official Release changed unexpectedly'}
 Write-Host "$($StepName.ToUpperInvariant())_BUILD=PASS runtime=$exe"

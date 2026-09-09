@@ -7,15 +7,15 @@ param(
 $ErrorActionPreference='Stop'
 $repo=Split-Path -Parent $PSScriptRoot
 $runtime=Join-Path $repo 'build\step06a4d-player\runtime'
-$exe=Join-Path $runtime 'DLSSVideoPlayer.exe'
+$exe=Join-Path $runtime 'CineLabVideoPlayer.exe'
 foreach($path in @($VideoPath,$exe)){if(-not(Test-Path -LiteralPath $path -PathType Leaf)){throw "File non trovato: $path"}}
 if($VideoPath.Contains('"')){throw 'Il percorso contiene un carattere non valido.'}
-$running=@(Get-Process -Name DLSSVideoPlayer -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $exe})
+$running=@(Get-Process -Name CineLabVideoPlayer -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $exe})
 if($running.Count){throw 'La versione Step06A4D e gia aperta. Chiuderla prima di avviare un nuovo test.'}
 # The player truncates its log at startup. Preserve the preceding session first.
 $archive=Join-Path $repo ('build\step06a4d-validation\sessions\'+(Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 New-Item -ItemType Directory -Path $archive -Force | Out-Null
-foreach($name in @('DLSSVideoPlayer.log','ReShade.log','step06a4d-runtime.txt')) {
+foreach($name in @('CineLabVideoPlayer.log','ReShade.log','step06a4d-runtime.txt')) {
     $path=Join-Path $runtime $name
     if(Test-Path -LiteralPath $path){Copy-Item -LiteralPath $path -Destination (Join-Path $archive $name)}
 }

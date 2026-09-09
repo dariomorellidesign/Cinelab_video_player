@@ -3,7 +3,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 
 echo ================================================================
-echo DLSS Video Player V11 - Windows x64 D3D12 / NGX / FFmpeg
+echo CineLab Video Player V11 - Windows x64 D3D12 / NGX / FFmpeg
 echo ================================================================
 
 echo [0/5] Locating build tools...
@@ -209,7 +209,7 @@ if errorlevel 1 (
 
 echo.
 echo [5/5] Staging runtime files...
-if not exist "build\Release\DLSSVideoPlayer.exe" (
+if not exist "build\Release\CineLabVideoPlayer.exe" (
     echo [ERROR] Build reported success but the EXE was not found.
     pause
     exit /b 1
@@ -217,7 +217,7 @@ if not exist "build\Release\DLSSVideoPlayer.exe" (
 copy /y "%FFMPEG_DIR%\ffmpeg.exe" "build\Release\ffmpeg.exe" >nul
 copy /y "%FFMPEG_DIR%\ffprobe.exe" "build\Release\ffprobe.exe" >nul
 if errorlevel 1 (
-    echo [ERROR] Could not copy FFmpeg beside DLSSVideoPlayer.exe.
+    echo [ERROR] Could not copy FFmpeg beside CineLabVideoPlayer.exe.
     pause
     exit /b 1
 )
@@ -256,7 +256,7 @@ xcopy /e /i /y "languages\*" "build\Release\languages\" >nul
 
 echo.
 echo ================================================================
-echo [OK] build\Release\DLSSVideoPlayer.exe
+echo [OK] build\Release\CineLabVideoPlayer.exe
 echo [OK] build\Release\ffmpeg.exe
 echo [OK] build\Release\ffprobe.exe
 echo ================================================================

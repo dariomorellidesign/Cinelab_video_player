@@ -1,4 +1,4 @@
-﻿#include <windows.h>
+#include <windows.h>
 #include <windowsx.h>
 #include <shellapi.h>
 #include <shobjidl.h>
@@ -242,7 +242,7 @@ public:
         WNDCLASSW u{}; u.style=CS_DBLCLKS; u.lpfnWndProc=ControlsWndProcStatic; u.hInstance=hi; u.lpszClassName=L"DLSSMediaControlsClassV12"; u.hCursor=LoadCursor(nullptr,IDC_ARROW); u.hbrBackground=nullptr; RegisterClassW(&u);
         WNDCLASSW a{}; a.lpfnWndProc=AdjustWndProcStatic; a.hInstance=hi; a.lpszClassName=L"DLSSVideoAdjustmentsClassV11"; a.hCursor=LoadCursor(nullptr,IDC_ARROW); a.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1); RegisterClassW(&a);
         WNDCLASSW sub{}; sub.lpfnWndProc=SubtitleWndProcStatic; sub.hInstance=hi; sub.lpszClassName=L"DLSSSubtitleOverlayClass"; sub.hCursor=LoadCursor(nullptr,IDC_ARROW); sub.hbrBackground=nullptr; RegisterClassW(&sub);
-        WNDCLASSW w{}; w.lpfnWndProc=WndProcStatic; w.hInstance=hi; w.lpszClassName=L"DLSSVideoPlayerV11Class"; w.hCursor=LoadCursor(nullptr,IDC_ARROW); w.hbrBackground=CreateSolidBrush(RGB(18,19,21)); RegisterClassW(&w);
+        WNDCLASSW w{}; w.lpfnWndProc=WndProcStatic; w.hInstance=hi; w.lpszClassName=L"CineLabVideoPlayerV11Class"; w.hCursor=LoadCursor(nullptr,IDC_ARROW); w.hbrBackground=CreateSolidBrush(RGB(18,19,21)); RegisterClassW(&w);
         RECT rc{0,0,1440,880}; AdjustWindowRect(&rc,WS_OVERLAPPEDWINDOW,TRUE);
         const std::wstring appTitle=m_loc.Get(L"app.title");
         m_hwnd=CreateWindowExW(WS_EX_ACCEPTFILES,w.lpszClassName,appTitle.c_str(),WS_OVERLAPPEDWINDOW|WS_VISIBLE|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,rc.right-rc.left,rc.bottom-rc.top,nullptr,CreateMenuBar(),hi,this);
@@ -344,8 +344,8 @@ private:
 
     std::filesystem::path SettingsPath()const{
         wchar_t p[32768]{};DWORD n=GetModuleFileNameW(nullptr,p,static_cast<DWORD>(std::size(p)));
-        if(!n||n>=std::size(p))return std::filesystem::current_path()/L"DLSSVideoPlayer.ini";
-        return std::filesystem::path(p).parent_path()/L"DLSSVideoPlayer.ini";
+        if(!n||n>=std::size(p))return std::filesystem::current_path()/L"CineLabVideoPlayer.ini";
+        return std::filesystem::path(p).parent_path()/L"CineLabVideoPlayer.ini";
     }
 
     float ReadIniFloat(const wchar_t* section,const wchar_t* key,float fallback)const{
@@ -1017,7 +1017,7 @@ private:
         if(m_renderer->DLSSEnabled())s<<QualityNameW(m_activeQuality);else s<<L"Off";
         s<<L"  |  FG ";if(m_frameGenerationEnabled)s<<m_frameGenerationMultiplier<<L"x";else s<<L"Off";
         if(m_droppedFrames)s<<L"  |  "<<m_droppedFrames<<L" dropped";
-        s<<L"  —  DLSS Video Player";SetWindowTextW(m_hwnd,s.str().c_str());
+        s<<L"  —  CineLab Video Player";SetWindowTextW(m_hwnd,s.str().c_str());
     }
 
     void Layout(){
@@ -1189,7 +1189,7 @@ private:
             L"Frame Generation\nUse DLSS Frame Generation primarily for high multipliers. When 2x is sufficient, NVIDIA Smooth Motion from the NVIDIA Control Panel 3D settings is usually the better choice. With V-Sync enabled, multipliers that exceed the display refresh limit are disabled.\n\n"
             L"NVOF\nSlow favors optical-flow quality at a higher cost. Medium is recommended. Fast lowers the cost, with less accurate motion in difficult scenes. These options are available in Settings > Developer tools.\n\n"
             L"RenoDX NR\nThe package already includes the ReShade proxy (dxgi.dll), the RenoDX add-on and ReShade.ini. Do not install a second ReShade copy in the runtime folder. Open the ReShade overlay with Home and locate RenoDX.DLSS5. NR currently uses the SR/DLSS path as its carrier, so SR must remain enabled.";
-        MessageBoxW(m_hwnd,guide,L"DLSS Video Player — Help",MB_OK|MB_ICONINFORMATION);
+        MessageBoxW(m_hwnd,guide,L"CineLab Video Player — Help",MB_OK|MB_ICONINFORMATION);
     }
     void OpenFromDialog(){auto p=PickVideoFile(m_hwnd,m_loc);if(!p.empty())Load(p);}
     void MouseDown(int x,int y){SetFocus(m_hwnd);if(!m_loaded&&PtIn(EmptyOpenRect(),x,y))OpenFromDialog();}

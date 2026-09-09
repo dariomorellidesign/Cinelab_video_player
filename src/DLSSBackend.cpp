@@ -36,7 +36,7 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
         m_lastResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
             "50f09991-2962-44db-bad7-4be06dbbd1d2",
             NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-            "DLSSVideoPlayer-10.0",
+            "CineLabVideoPlayer-10.0",
             logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
         if (NVSDK_NGX_FAILED(m_lastResult)) {
             LOG("NGX Init failed result=0x" << std::hex << m_lastResult);
@@ -57,7 +57,7 @@ bool DLSSBackend::Initialize(ID3D12Device* device, ID3D12GraphicsCommandList*,
             m_lastResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
                 "50f09991-2962-44db-bad7-4be06dbbd1d2",
                 NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-                "DLSSVideoPlayer-10.0",
+                "CineLabVideoPlayer-10.0",
                 logDir.c_str(), device, nullptr, NVSDK_NGX_Version_API);
             if (NVSDK_NGX_FAILED(m_lastResult)) {
                 LOG("[DLSS-G] RAW NGX co-init failed result=0x" << std::hex << m_lastResult);

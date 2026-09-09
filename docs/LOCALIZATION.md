@@ -32,7 +32,7 @@ button.play=Reproducir
 
 Missing keys automatically fall back to the built-in English strings.
 
-The selected language is stored in `DLSSVideoPlayer.ini` under:
+The selected language is stored in `CineLabVideoPlayer.ini` under:
 
 ```ini
 [General]

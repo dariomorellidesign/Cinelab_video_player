@@ -21,7 +21,7 @@
 - Added paused-frame presentation heartbeat so ReShade remains responsive while playback is frozen without advancing video or NGX history.
 - Prevented GDI background erases over the D3D12 render child and limited mouse-hover invalidation to the control bar to address surface flashing.
 - Added `WS_CLIPCHILDREN` / `WS_CLIPSIBLINGS` window composition changes for the video surface.
-- Preserved image settings and language independently in `DLSSVideoPlayer.ini`.
+- Preserved image settings and language independently in `CineLabVideoPlayer.ini`.
 - Restructured documentation and repository metadata for public GitHub use.
 
 ## 0.10.0 - 2026-08-29

@@ -16,7 +16,7 @@ Confirm that:
 - Matching DLSS/DLSSNR runtime files are used together.
 - The add-on is enabled in ReShade's **Add-ons** page.
 
-Run `prepare_dlss5_test.bat` and inspect `DLSSVideoPlayer.log` plus `ReShade.log`.
+Run `prepare_dlss5_test.bat` and inspect `CineLabVideoPlayer.log` plus `ReShade.log`.
 
 ## Video playback is slower than the source
 
@@ -53,7 +53,7 @@ If flashing still occurs, test once with ReShade disabled. If it only occurs wit
 
 Seeking is transactional: playback is paused, audio is stopped/joined, GPU work is synchronized, the decoder is repositioned/reopened if needed, temporal state is reset, then playback resumes.
 
-If a file still crashes on seek, attach `DLSSVideoPlayer.log` and include the container/codec information from `ffprobe`.
+If a file still crashes on seek, attach `CineLabVideoPlayer.log` and include the container/codec information from `ffprobe`.
 
 ## A video does not appear in the Open dialog
 

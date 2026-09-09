@@ -129,7 +129,7 @@ private:
     }
 
     std::wstring ReadConfiguredLanguage() const {
-        const auto ini = m_base / L"DLSSVideoPlayer.ini";
+        const auto ini = m_base / L"CineLabVideoPlayer.ini";
         wchar_t value[64]{};
         GetPrivateProfileStringW(L"General", L"Language", L"", value, static_cast<DWORD>(std::size(value)), ini.c_str());
         if (value[0]) return NormalizeCode(value);
@@ -147,13 +147,13 @@ private:
     }
 
     void SaveConfiguredLanguage() const {
-        const auto ini = m_base / L"DLSSVideoPlayer.ini";
+        const auto ini = m_base / L"CineLabVideoPlayer.ini";
         WritePrivateProfileStringW(L"General", L"Language", m_code.c_str(), ini.c_str());
     }
 
     static Map EnglishDefaults() {
         return {
-            {L"app.title", L"DLSS Video Player"},
+            {L"app.title", L"CineLab Video Player"},
             {L"menu.file", L"File"}, {L"menu.open", L"Open video...\tCtrl+O"}, {L"menu.exit", L"Exit"},
             {L"menu.playback", L"Playback"}, {L"menu.playpause", L"Play / Pause\tSpace   (Overlay: Ctrl+Alt+Space)"}, {L"menu.stop", L"Stop"},
             {L"menu.back10", L"Back 10 s\tLeft"}, {L"menu.forward10", L"Forward 10 s\tRight"}, {L"menu.mute", L"Mute\tM"},
@@ -174,8 +174,8 @@ private:
             {L"adjustments.reset", L"Reset"}, {L"adjustments.close", L"Close"},
             {L"idle.title", L"Drop a video here"}, {L"idle.subtitle", L"or open a file to start playback with DLSS"}, {L"idle.open", L"Open video..."},
             {L"dialog.title", L"Open video"}, {L"dialog.all_ffmpeg", L"All files (FFmpeg auto-detect)"}, {L"dialog.supported", L"Common video files"}, {L"dialog.all", L"All files"},
-            {L"error.decode", L"Could not open or decode this video. See DLSSVideoPlayer.log for details."},
-            {L"error.renderer", L"Could not initialize D3D12/NGX. See DLSSVideoPlayer.log for details."},
+            {L"error.decode", L"Could not open or decode this video. See CineLabVideoPlayer.log for details."},
+            {L"error.renderer", L"Could not initialize D3D12/NGX. See CineLabVideoPlayer.log for details."},
             {L"error.frame", L"The file opened, but no video frame could be decoded."},
             {L"error.seek", L"Could not seek to the requested position."},
             {L"status.muted", L"Muted"}, {L"status.volume", L"Vol"}, {L"status.seeking", L"Seeking..."}

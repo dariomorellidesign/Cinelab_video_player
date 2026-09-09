@@ -13,7 +13,7 @@ This is an **optional, experimental** path. CineLab itself provides video playba
 
 1. Extract CineLab to a dedicated folder, for example `C:\CineLab-NR-Test`.
 2. Start CineLab once and confirm that normal playback works with **SR Off**.
-3. Install a compatible ReShade build with add-on support for `DLSSVideoPlayer.exe`, selecting the DirectX 10/11/12 path when asked by its installer.
+3. Install a compatible ReShade build with add-on support for `CineLabVideoPlayer.exe`, selecting the DirectX 10/11/12 path when asked by its installer.
 4. Add the compatible RenoDX/NR components supplied by their own provider to this same test folder. Keep components from one matching release together.
 5. Start CineLab and press **Home** to open ReShade. Open **Add-ons**, locate the Neural Rendering panel, enable it, then return to the video.
 6. Use the player’s **SR** control as the carrier path required by the optional component. Compare it against **SR Off** with the same scene and output resolution.
@@ -22,7 +22,7 @@ This is an **optional, experimental** path. CineLab itself provides video playba
 
 Some community tools automate ReShade and related optional files. They are not CineLab dependencies and are not bundled, validated or supported by this project. In particular, a tool may download closed-source or leaked runtime components; read its documentation, licences and release notes before running it.
 
-For CineLab, choose a tool only if it lets you select `DLSSVideoPlayer.exe` in the dedicated test folder and makes its changes reversible. Keep its manifest/log files, use its removal command before changing versions, and never let it overwrite your clean CineLab install.
+For CineLab, choose a tool only if it lets you select `CineLabVideoPlayer.exe` in the dedicated test folder and makes its changes reversible. Keep its manifest/log files, use its removal command before changing versions, and never let it overwrite your clean CineLab install.
 
 ## Verification and troubleshooting
 
@@ -33,7 +33,7 @@ The expected sequence is:
 3. The add-on is visible on ReShade’s **Add-ons** page.
 4. Enabling the optional NR path visibly changes the image while the player remains responsive.
 
-If CineLab fails to start after adding optional files, close it, move the added files out of the test folder, and confirm the clean player still starts. Save `DLSSVideoPlayer.log` and `ReShade.log` before changing anything else; remove personal paths before sharing logs in an issue.
+If CineLab fails to start after adding optional files, close it, move the added files out of the test folder, and confirm the clean player still starts. Save `CineLabVideoPlayer.log` and `ReShade.log` before changing anything else; remove personal paths before sharing logs in an issue.
 
 ## What CineLab can support
 

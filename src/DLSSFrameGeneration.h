@@ -68,7 +68,7 @@ public:
         pref.featuresToLoad = features;
         pref.numFeaturesToLoad = static_cast<uint32_t>(std::size(features));
         pref.engine = sl::EngineType::eCustom;
-        pref.engineVersion = "DLSSVideoPlayer-10.0";
+        pref.engineVersion = "CineLabVideoPlayer-10.0";
         pref.projectId = "50f09991-2962-44db-bad7-4be06dbbd1d2";
         const auto baseFlags = static_cast<uint64_t>(pref.flags);
         pref.flags = static_cast<sl::PreferenceFlags>(

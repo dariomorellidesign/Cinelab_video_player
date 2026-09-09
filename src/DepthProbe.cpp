@@ -143,7 +143,7 @@ int wmain(int argc, wchar_t** argv) {
 
         VideoDecoder decoder;
         if (!decoder.Open(videoPath.wstring())) {
-            std::wcerr << L"[FAIL] Could not open video. See DLSSVideoPlayer.log if FFmpeg/MF emitted details.\n";
+            std::wcerr << L"[FAIL] Could not open video. See CineLabVideoPlayer.log if FFmpeg/MF emitted details.\n";
             exitCode = 5;
         } else {
             if (seconds > 0.0 && !decoder.SeekSeconds(seconds)) {

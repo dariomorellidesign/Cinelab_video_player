@@ -32,7 +32,7 @@ build/
 The Release executable is written to:
 
 ```text
-build\Release\DLSSVideoPlayer.exe
+build\Release\CineLabVideoPlayer.exe
 ```
 
 ## Manual CMake build

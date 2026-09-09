@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
-project(DLSSVideoPlayer VERSION 0.12.0 LANGUAGES CXX)
+project(CineLabVideoPlayer VERSION 0.12.0 LANGUAGES CXX)
 
 if(NOT WIN32)
-    message(FATAL_ERROR "DLSSVideoPlayer currently targets Windows x64 / D3D12 only.")
+    message(FATAL_ERROR "CineLabVideoPlayer currently targets Windows x64 / D3D12 only.")
 endif()
 if(NOT MSVC)
     message(FATAL_ERROR "Use Visual Studio 2022 / MSVC for this build.")
@@ -42,7 +42,7 @@ target_include_directories(dmp_nvof_sdk PUBLIC
 )
 target_link_libraries(dmp_nvof_sdk PUBLIC d3d12 dxgi)
 
-add_executable(DLSSVideoPlayer WIN32
+add_executable(CineLabVideoPlayer WIN32
     src/main.cpp
     src/VideoDecoder.cpp
     src/VideoDecoder.h
@@ -61,13 +61,13 @@ add_executable(DLSSVideoPlayer WIN32
     src/Localization.h
 )
 
-target_compile_definitions(DLSSVideoPlayer PRIVATE
+target_compile_definitions(CineLabVideoPlayer PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
 )
-target_compile_options(DLSSVideoPlayer PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
-target_include_directories(DLSSVideoPlayer PRIVATE "${DLSS_SDK}/include")
-target_link_directories(DLSSVideoPlayer PRIVATE "${DLSS_LIB_DIR}")
-target_link_libraries(DLSSVideoPlayer PRIVATE
+target_compile_options(CineLabVideoPlayer PRIVATE /W4 /permissive- /EHsc /Zc:__cplusplus)
+target_include_directories(CineLabVideoPlayer PRIVATE "${DLSS_SDK}/include")
+target_link_directories(CineLabVideoPlayer PRIVATE "${DLSS_LIB_DIR}")
+target_link_libraries(CineLabVideoPlayer PRIVATE
     d3d12 dxgi dxguid d3dcompiler
     mfplat mfreadwrite mfuuid
     ole32 shell32 shlwapi comdlg32 comctl32 user32 gdi32 winmm dwmapi
@@ -75,39 +75,39 @@ target_link_libraries(DLSSVideoPlayer PRIVATE
     dmp_nvof_sdk
 )
 
-add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
+add_custom_command(TARGET CineLabVideoPlayer POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<IF:$<CONFIG:Debug>,${DLSS_RUNTIME_DEV},${DLSS_RUNTIME_REL}>"
-        "$<TARGET_FILE_DIR:DLSSVideoPlayer>/nvngx_dlss.dll"
+        "$<TARGET_FILE_DIR:CineLabVideoPlayer>/nvngx_dlss.dll"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/README.md"
-        "$<TARGET_FILE_DIR:DLSSVideoPlayer>/README.md"
+        "$<TARGET_FILE_DIR:CineLabVideoPlayer>/README.md"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/LICENSE"
-        "$<TARGET_FILE_DIR:DLSSVideoPlayer>/LICENSE"
+        "$<TARGET_FILE_DIR:CineLabVideoPlayer>/LICENSE"
     COMMAND ${CMAKE_COMMAND} -E make_directory
-        "$<TARGET_FILE_DIR:DLSSVideoPlayer>/languages"
+        "$<TARGET_FILE_DIR:CineLabVideoPlayer>/languages"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/languages"
-        "$<TARGET_FILE_DIR:DLSSVideoPlayer>/languages"
+        "$<TARGET_FILE_DIR:CineLabVideoPlayer>/languages"
 )
 
 # The one-click BAT stages these binaries automatically. Keep this optional so
 # developers can still configure CMake before downloading FFmpeg.
 set(FFMPEG_STAGED_DIR "${CMAKE_SOURCE_DIR}/external/ffmpeg/bin")
 if(EXISTS "${FFMPEG_STAGED_DIR}/ffmpeg.exe" AND EXISTS "${FFMPEG_STAGED_DIR}/ffprobe.exe")
-    add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
+    add_custom_command(TARGET CineLabVideoPlayer POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${FFMPEG_STAGED_DIR}/ffmpeg.exe"
-            "$<TARGET_FILE_DIR:DLSSVideoPlayer>/ffmpeg.exe"
+            "$<TARGET_FILE_DIR:CineLabVideoPlayer>/ffmpeg.exe"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${FFMPEG_STAGED_DIR}/ffprobe.exe"
-            "$<TARGET_FILE_DIR:DLSSVideoPlayer>/ffprobe.exe"
+            "$<TARGET_FILE_DIR:CineLabVideoPlayer>/ffprobe.exe"
     )
 endif()
 # === STEP04A1_DEPTH_PROBE_BEGIN ===
 # Standalone AI-depth characterization target. It deliberately does not modify
-# the DLSSVideoPlayer runtime path yet.
+# the CineLabVideoPlayer runtime path yet.
 set(DMP_AI_WORKBENCH "C:/PROGETTO_DLSS/AI-Depth-Workbench" CACHE PATH "DMP AI depth workbench")
 set(DMP_AI_RUNTIME "${DMP_AI_WORKBENCH}/runtime")
 set(DMP_DEPTH_MODEL "${DMP_AI_WORKBENCH}/models/depth_anything_v2_small_fp16.onnx")
@@ -209,7 +209,7 @@ foreach(_req "${DMP_TRTRTX_LIB}" "${DMP_TRTRTX_DLL}" "${DMP_TRTRTX_ENGINE}")
     endif()
 endforeach()
 
-target_sources(DLSSVideoPlayer PRIVATE
+target_sources(CineLabVideoPlayer PRIVATE
     src/AIDepthWorker.cpp
     src/AIDepthWorker.h
     src/AIDepthIpc.h
@@ -237,15 +237,15 @@ target_link_libraries(DMPAIDepthWorker PRIVATE "${DMP_TRTRTX_LIB}" CUDA::cudart)
 set_target_properties(DMPAIDepthWorker PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/ai_depth"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release/ai_depth")
-add_dependencies(DLSSVideoPlayer DMPAIDepthWorker)
+add_dependencies(CineLabVideoPlayer DMPAIDepthWorker)
 
-add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:DLSSVideoPlayer>/models"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DMP_TRTRTX_ENGINE}" "$<TARGET_FILE_DIR:DLSSVideoPlayer>/models/depth_anything_v2_small_fp16_dynamic_518.trt"
-    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:DLSSVideoPlayer>/cache")
+add_custom_command(TARGET CineLabVideoPlayer POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CineLabVideoPlayer>/models"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DMP_TRTRTX_ENGINE}" "$<TARGET_FILE_DIR:CineLabVideoPlayer>/models/depth_anything_v2_small_fp16_dynamic_518.trt"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:CineLabVideoPlayer>/cache")
 if(EXISTS "${DMP_TRTRTX_CACHE}")
-    add_custom_command(TARGET DLSSVideoPlayer POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DMP_TRTRTX_CACHE}" "$<TARGET_FILE_DIR:DLSSVideoPlayer>/cache/depth_anything_v2_small_fp16_dynamic_518.cache")
+    add_custom_command(TARGET CineLabVideoPlayer POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DMP_TRTRTX_CACHE}" "$<TARGET_FILE_DIR:CineLabVideoPlayer>/cache/depth_anything_v2_small_fp16_dynamic_518.cache")
 endif()
 
 file(GLOB DMP_TRTRTX_RUNTIME_DLLS "${DMP_TRTRTX_ROOT}/bin/*.dll")
@@ -261,29 +261,29 @@ endforeach()
 # === STEP04A2_TRTRTX_PLAYER_END ===
 
 # Step 04E soft temporal mask
-target_sources(DLSSVideoPlayer PRIVATE src/SoftTemporalMask.cpp)
+target_sources(CineLabVideoPlayer PRIVATE src/SoftTemporalMask.cpp)
 
 # Step 04E-1 AI depth-guided temporal mask
-target_sources(DLSSVideoPlayer PRIVATE src/MaskDepthGuide.cpp)
+target_sources(CineLabVideoPlayer PRIVATE src/MaskDepthGuide.cpp)
 
 # Step 04E-2 scene-cut reset for soft Temporal Mask
-target_sources(DLSSVideoPlayer PRIVATE src/SceneCutDetector.cpp)
+target_sources(CineLabVideoPlayer PRIVATE src/SceneCutDetector.cpp)
 
 # Step 04F synchronized split-screen comparator
-target_sources(DLSSVideoPlayer PRIVATE src/SplitScreenLayout.cpp)
+target_sources(CineLabVideoPlayer PRIVATE src/SplitScreenLayout.cpp)
 
 # Step 04G media stream selection + post-DLSS text subtitles
-target_sources(DLSSVideoPlayer PRIVATE src/MediaTracks.cpp src/SubtitlePlayer.cpp)
+target_sources(CineLabVideoPlayer PRIVATE src/MediaTracks.cpp src/SubtitlePlayer.cpp)
 
 # STEP 05B Streamline headers - runtime is loaded dynamically; no NVIDIA binary is linked or redistributed here.
 set(DMP_STREAMLINE_SDK "${CMAKE_SOURCE_DIR}/external/streamline-sdk-v2.12.0" CACHE PATH "Pinned NVIDIA Streamline SDK root")
 if(NOT EXISTS "${DMP_STREAMLINE_SDK}/include/sl.h" OR NOT EXISTS "${DMP_STREAMLINE_SDK}/include/sl_dlss_g.h")
     message(FATAL_ERROR "Step05B requires the Streamline SDK fetched by Step05A at ${DMP_STREAMLINE_SDK}")
 endif()
-foreach(dmp_sl_target DLSSVideoPlayer NeuralWorker UpscalingGpuSmoke PolicyTests PlayerUiRegressionTests)
+foreach(dmp_sl_target CineLabVideoPlayer NeuralWorker UpscalingGpuSmoke PolicyTests PlayerUiRegressionTests)
     if(TARGET ${dmp_sl_target})
         target_include_directories(${dmp_sl_target} PRIVATE "${DMP_STREAMLINE_SDK}/include")
     endif()
 endforeach()
-target_sources(DLSSVideoPlayer PRIVATE src/DLSSFrameGeneration.h)
+target_sources(CineLabVideoPlayer PRIVATE src/DLSSFrameGeneration.h)
 # STEP 05B Streamline headers END

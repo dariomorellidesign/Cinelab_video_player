@@ -10,7 +10,7 @@ set "SRC=build\Release"
 set "STAGE=dist\CineLabVideoPlayer-v%VERSION%-win64"
 set "ZIP=dist\CineLabVideoPlayer-v%VERSION%-win64.zip"
 
-if not exist "%SRC%\DLSSVideoPlayer.exe" (
+if not exist "%SRC%\CineLabVideoPlayer.exe" (
   echo [ERROR] Promote the validated player first with tools\Promote-Step07DToRelease.ps1
   exit /b 1
 )
@@ -19,7 +19,7 @@ if exist "%STAGE%" rmdir /s /q "%STAGE%"
 if not exist "dist" mkdir "dist"
 mkdir "%STAGE%"
 
-copy /y "%SRC%\DLSSVideoPlayer.exe" "%STAGE%\DLSSVideoPlayer.exe" >nul
+copy /y "%SRC%\CineLabVideoPlayer.exe" "%STAGE%\CineLabVideoPlayer.exe" >nul
 copy /y "%SRC%\ffmpeg.exe" "%STAGE%\ffmpeg.exe" >nul
 copy /y "%SRC%\ffprobe.exe" "%STAGE%\ffprobe.exe" >nul
 

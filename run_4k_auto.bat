@@ -1,10 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if exist "DLSSVideoPlayer.exe" (
-  set "EXE=DLSSVideoPlayer.exe"
+if exist "CineLabVideoPlayer.exe" (
+  set "EXE=CineLabVideoPlayer.exe"
 ) else (
-  set "EXE=build\Release\DLSSVideoPlayer.exe"
+  set "EXE=build\Release\CineLabVideoPlayer.exe"
 )
 if not exist "%EXE%" (
   echo Build first with build_windows.bat
